@@ -242,5 +242,5 @@ services:
       - COLUMNS=${UI_COLUMNS:-coordinator,tester,deployer}
       - ROWS=${UI_ROWS:-coder-1,coder-2,coder-3,coder-4}
       - LAYOUT=${UI_LAYOUT:-columns_left}
-      - PAGE_TITLE=${UI_PAGE_TITLE:-slophyphus}
+      - PAGE_TITLE=${UI_PAGE_TITLE:-slopyphus}
 

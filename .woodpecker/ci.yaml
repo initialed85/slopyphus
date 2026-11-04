@@ -27,9 +27,9 @@
 # clusters/dev/applications/woodpecker/files/enable-docker-tcp.sh). Pinning one node per repo is what
 # keeps the layer cache warm, which matters a lot here: this Dockerfile is apt-heavy.
 #
-# Note the name mismatch, left alone on purpose: the GitHub repo is `slophyphus` and the image tag is
-# `initialed85/slopyphus` (no h). Renaming the image would break anything already pulling it by hand,
-# so this file reproduces the tag the script uses rather than "fixing" it.
+# The GitHub repo used to be `slophyphus` (a stray h) while the image tag was always
+# `initialed85/slopyphus` (no h). The repo is now `slopyphus`, so the names match; the image names never
+# changed, because they are what the cluster's kustomizations and any hand-pull already reference.
 steps:
   - name: build-app-image
     image: docker.io/library/docker:cli

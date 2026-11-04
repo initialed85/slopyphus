@@ -9,8 +9,9 @@ Two images:
 | `initialed85/slopyphus` | `Dockerfile` | one agent: ubuntu, tmux, ttyd, pi, trzsz, docker-cli, uv, go, node, kubectl |
 | `initialed85/slopyphus-nginx` | `Dockerfile.nginx` | the UI: nginx plus an entrypoint that renders its config from environment variables |
 
-The name mismatch is real and left alone: the GitHub repo is `slophyphus`, the image tag is
-`initialed85/slopyphus`.
+The repo used to be `slophyphus` (a stray h) while the images were always `initialed85/slopyphus`; the
+GitHub repo is now `slopyphus`, so all three spellings agree. The image names never changed, because
+they are what the cluster and anyone pulling by hand already used.
 
 # One agent
 
@@ -45,7 +46,7 @@ The front renders `nginx.conf` and `index.html` at container start from these va
 | `ROWS` | empty | comma separated `name=url` pairs, one full-width band each |
 | `LAYOUT` | `columns_left` | `columns_left` \| `columns_right` \| `rows_top` \| `rows_bottom` |
 | `AGENT_PORT` | `7681` | the port a bare host is assumed to be a ttyd on |
-| `PAGE_TITLE` | `slophyphus` | browser tab title |
+| `PAGE_TITLE` | `slopyphus` | browser tab title |
 | `RESOLVER` | auto | DNS server for upstream resolution; `off` to resolve at start instead |
 | `SVC_SUFFIX` | empty | appended to bare hosts when looking them up; see [Kubernetes](#kubernetes) |
 

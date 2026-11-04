@@ -30,7 +30,7 @@
 #
 # Other environment
 #   AGENT_PORT   slopyphus/ttyd port, assumed when a bare host is given        (default 7681)
-#   PAGE_TITLE   the browser tab title                                         (default slophyphus)
+#   PAGE_TITLE   the browser tab title                                         (default slopyphus)
 #   RESOLVER     DNS server for per-request upstream resolution; auto-detected from
 #                /etc/resolv.conf, or set to off to resolve every upstream when nginx starts
 #   SVC_SUFFIX   appended to bare hosts when looking them up, for Kubernetes: nginx does not expand
@@ -62,7 +62,7 @@ CONF_OUT=${CONF_OUT:-/etc/nginx/conf.d/default.conf}
 HTML_OUT=${HTML_OUT:-/usr/share/nginx/html/index.html}
 AGENT_PORT=${AGENT_PORT:-7681}
 LAYOUT=${LAYOUT:-columns_left}
-PAGE_TITLE=${PAGE_TITLE:-slophyphus}
+PAGE_TITLE=${PAGE_TITLE:-slopyphus}
 
 # See $SVC_SUFFIX's note in parse_spec: this is a Kubernetes convenience, off by default because a
 # compose network resolves bare names without any help.
