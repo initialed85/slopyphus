@@ -70,6 +70,24 @@ steps:
       - "grep -qF 'group group-columns' /tmp/rendered/index.html"
       - "grep -qF 'group group-rows' /tmp/rendered/index.html"
       - "test $(grep -c '<iframe' /tmp/rendered/index.html) = 7"
+      # Scrollbars. This is the thing the desktop is judged on: a bar on the desktop itself costs a strip
+      # of every pane's width at once, and a bar inside a pane eats part of that pane. Three causes, all
+      # measured in the testbed (hack/front-testbed.sh cdp --url ... --expression-file hack/probe-scrollbars.js
+      # and hack/probe-terminal.js, on the 20-column desktop the dev cluster runs at 800x600):
+      #   42px of horizontal overflow, from a pane label 78px wide sitting in a pane 40px wide - an
+      #     absolutely positioned label is overflow its cell does not stop, and it reaches the viewport.
+      #   3px of vertical overflow, at every viewport size, because an iframe is an inline replaced element
+      #     and sits on a text baseline: the line box is the iframe plus the font's descent.
+      #   a bar in every terminal pane, because ttyd's own CSS is `.xterm .xterm-viewport{overflow-y:scroll}`
+      #     and the page above cannot style inside an iframe.
+      # The greps pin the shipped answers to those three; the behaviour itself is measured in the testbed
+      # rather than asserted here, because there is no browser in this step.
+      - "grep -qF 'display: block;' /tmp/rendered/index.html" # iframe is block, so the 3px baseline goes
+      - "grep -qF 'max-width: calc(100% - 8px);' /tmp/rendered/index.html" # a label stops at its pane
+      - "grep -qF 'text-overflow: ellipsis;' /tmp/rendered/index.html"
+      - "awk '/^      html,/,/^      }/' /tmp/rendered/index.html | grep -q 'overflow: hidden'" # the desktop cannot scroll, so it cannot show a bar
+      - "test $(grep -cF '::-webkit-scrollbar{width:0!important;height:0!important}*{scrollbar-width:none!important}' /tmp/rendered/index.html) = 1" # the rule injected into every pane
+      - "test $(grep -cF 'slopyphus-pane-scrollbars' /tmp/rendered/index.html) = 1" # the style element it is injected as
       - "nginx -t -c /tmp/nginx.conf"
       # An arbitrary origin, framed through nginx: Host header and base path both come from the URL.
       - "COLUMNS='web=https://www.google.com/maps' ROWS= sh ./docker-entrypoint.nginx.sh true"

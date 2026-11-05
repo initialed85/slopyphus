@@ -16,16 +16,25 @@
     <meta charset="utf-8" />
     <title>@@PAGE_TITLE@@</title>
     <style>
+      /* The desktop's own scrollbars. Worth being explicit about the scope: an iframe is a document of
+         its own and nothing in this <style> reaches the page inside a pane. That half of the problem is
+         handled by PANE_SCROLLBAR_CSS in the script below. */
       ::-webkit-scrollbar {
         display: none;
       } /* Chrome, Safari, Edge */
       * {
         scrollbar-width: none;
-      } /* Firefox */
+      } /* Firefox, and Chrome 121+ */
       html,
       body {
         margin: 0;
         height: 100%;
+        /* This page is a fixed grid, not a document with content to reach: #wrap is 100vh of panes and
+           there is nothing below it. Clipping is the guarantee that no scrollbar of the desktop's own can
+           ever appear, because one of those costs a strip of width from every pane at once. The two rules
+           that used to make it overflow (an inline iframe, and a label wider than its pane) are fixed
+           below rather than hidden here. */
+        overflow: hidden;
         background: #111;
         color: #ccc;
         font: 12px monospace;
@@ -57,6 +66,10 @@
         min-height: 0;
       }
       iframe {
+        /* An iframe is an inline replaced element by default, so it sits on the line's baseline and the
+           line box is the iframe plus the font's descent below it: 3px taller than the viewport at 12px
+           monospace, which is a vertical scrollbar on the desktop. Block level, and it fills the cell. */
+        display: block;
         width: 100%;
         height: 100%;
         min-width: 0;
@@ -68,6 +81,7 @@
          pointer-events: none so a label can never steal a click or a keystroke from a terminal. */
       .tag {
         position: absolute;
+        box-sizing: border-box; /* so the max-width below is the whole label, padding included */
         top: 2px;
         left: 4px;
         padding: 0 3px;
@@ -75,6 +89,14 @@
         color: #777;
         pointer-events: none;
         z-index: 2;
+        /* A label is absolutely positioned inside a cell that is position:relative, so a label wider than
+           its pane is overflow that the cell does not stop: with 20 panes at 40px each, "minecraft-pinger"
+           measured 78px wide and pushed the page to 842px in an 800px viewport, which is a horizontal
+           scrollbar on the desktop and a label printed over its neighbour's terminal. Ellipsis instead. */
+        white-space: nowrap;
+        max-width: calc(100% - 8px); /* the 4px inset on the left, mirrored on the right */
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
       #wrap iframe.focused {
         border-color: #00e676;
@@ -108,6 +130,7 @@
     <script>
       const frames = Array.from(document.querySelectorAll("#wrap iframe"));
       const boundDocuments = new WeakSet();
+      const styledDocuments = new WeakSet();
       const relayedKeyEvents = new WeakSet();
       let activeFrame = null;
       let expandedFrame = null;
@@ -251,6 +274,45 @@
         relayKeyboard(event, sourceFrame);
       }
 
+      /*
+       * The pane half of the scrollbar problem.
+       *
+       * A pane's scrollbars belong to the document inside the iframe, which the page above cannot style,
+       * so they have to be hidden from inside. That is possible because every upstream is framed through
+       * nginx under this page's own origin (/name/), which makes the pane same-origin (except a site that
+       * answers with a redirect: the browser then leaves the front and the pane really is cross-origin).
+       *
+       * The case that matters is ttyd, which is what a pane usually shows here. xterm's own CSS is
+       * `.xterm .xterm-viewport{...overflow-y:scroll...}`: a scroll container that always asks for a bar,
+       * and in a browser where a scrollbar takes layout space that is a strip down the right of every
+       * terminal on the desktop, whether or not the terminal has any scrollback to show.
+       *
+       * Both spellings are emitted because they are not interchangeable. `scrollbar-width` is the standard
+       * property (Firefox, Chrome 121+); `::-webkit-scrollbar` is what older Blink and WebKit have, and in
+       * that mode `display: none` hides the bar but leaves the gutter reserved while `width: 0` collapses
+       * it. Hiding a bar without giving its area back is the whole complaint, so the webkit half uses 0.
+       *
+       * Nothing here sets overflow: hidden on a pane. A pane whose content is taller than the pane is
+       * still scrollable by wheel or keyboard; it just no longer pays for the privilege in layout.
+       */
+      const PANE_SCROLLBAR_CSS = "::-webkit-scrollbar{width:0!important;height:0!important}*{scrollbar-width:none!important}";
+
+      function styleFrameDocument(frame) {
+        try {
+          const frameDocument = frame.contentDocument;
+          if (!frameDocument || !frameDocument.head || styledDocuments.has(frameDocument)) return;
+          styledDocuments.add(frameDocument);
+          const style = frameDocument.createElement("style");
+          // Appended last, so this wins a tie against whatever the upstream ships; !important covers the
+          // rest, because an upstream is entitled to style its own scrollbars and the desktop disagrees.
+          style.id = "slopyphus-pane-scrollbars";
+          style.textContent = PANE_SCROLLBAR_CSS;
+          frameDocument.head.appendChild(style);
+        } catch (_) {
+          // A cross-origin frame cannot be styled from here either.
+        }
+      }
+
       function bindFrameDocument(frame) {
         try {
           const frameDocument = frame.contentDocument;
@@ -262,6 +324,7 @@
           ["keydown", "keyup"].forEach((type) => {
             frameDocument.addEventListener(type, (event) => handleFrameKeyboard(event, frame), true);
           });
+          styleFrameDocument(frame);
         } catch (_) {
           // A cross-origin frame cannot be inspected for its pointer or keyboard events.
         }
@@ -273,6 +336,10 @@
         frame.addEventListener("focus", () => setActiveFrame(frame));
         frame.addEventListener("load", () => {
           bindFrameDocument(frame);
+          // Not every pane fires load the way the front expects (a proxied page that navigates itself,
+          // or one that was already bound by a pointer event before load), so the style is asked for
+          // again here. styleFrameDocument is idempotent per document.
+          styleFrameDocument(frame);
           if (activeFrame === frame) focusFrame(frame);
         });
         bindFrameDocument(frame);

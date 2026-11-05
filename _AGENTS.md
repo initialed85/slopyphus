@@ -78,6 +78,14 @@ container are output, not source- edit the template or the environment, never th
 - `.woodpecker/ci.yaml` asserts what the renderer emits. If you change the renderer's output, change the
   assertions in the same change- a check that passes because it looks for a string that is no longer
   produced is worse than no check.
+- The desktop shows no scrollbars, on the page or in a pane (`README.md`, "Panes and scrollbars"). The three
+  rules that make that true are load-bearing: `iframe { display: block }`, a pane label clipped to its pane,
+  and the style the script injects into every same-origin pane. A scrollbar hidden without its area given
+  back (old `::-webkit-scrollbar { display: none }`) is the failure this replaced, not the fix.
+- How the desktop looks is checked in `hack/front-testbed.sh` (working-tree templates as a live container)
+  and `hack/front-cdp.mjs` (CDP against the shared Chromium, which can wait for a pane to build its own UI).
+  Reproduce a layout with panes that are *names* pointing at `https://example.com`; do not point a headless
+  probe at a live agent's ttyd, because tmux sizes a window to its smallest client.
 
 # Reusable services
 

@@ -153,7 +153,48 @@ Service does not resolve 502s its own pane and nothing else.
 | `Alt+Shift+G` | broadcast: every keystroke goes to every pane at once (all panes turn red) |
 | `Shift+Enter` in a pane | newline — translated to `Ctrl+J`, which is what pi accepts; ttyd/xterm eats `Shift+Enter` |
 
+## Panes and scrollbars
+
+Nothing on the desktop shows a scrollbar, and there are two separate halves to that, because a scrollbar
+on the desktop costs a strip of width from *every* pane at once while a scrollbar inside a pane costs part
+of that one pane.
+
+The desktop itself is a fixed grid, so it has nothing to scroll to and says so (`overflow: hidden` on
+`html`/`body`). It used to overflow anyway, in two ways that are measured rather than guessed (see
+**Checks**, and note the viewport: the deployed desktop is 20 columns wide, so at 800px a pane is 40px):
+
+| viewport | overflow before | after | cause |
+| --- | --- | --- | --- |
+| 800x600 | 42px wide, 3px tall | 0, 0 | a label 78px wide in a pane 40px wide; the inline-iframe baseline |
+| 1280x800 | 18px wide, 3px tall | 0, 0 | same label in a 64px pane |
+| 1920x1080 | 3px tall | 0, 0 | label fits in a 96px pane |
+
+- An `iframe` is `display: block`. By default an iframe is an *inline replaced* element, so it sits on a
+  text baseline and the line box is the iframe plus the font's descent below it: 3px at 12px monospace, at
+  every viewport size, which is a vertical scrollbar on the desktop.
+- A pane's label is clipped to the pane (`max-width`, `text-overflow: ellipsis`), so a long name cannot be
+  overflow the grid has to accommodate: an absolutely positioned label is overflow its cell does not stop,
+  and that overflow reaches the viewport, which is where a horizontal scrollbar comes from.
+
+Inside a pane is a different problem, because the page above cannot style the document in an iframe. Every
+upstream is framed through nginx under the front's own origin, so the pane is same-origin and the script
+appends a `<style id="slopyphus-pane-scrollbars">` to it: `scrollbar-width: none` (standard, Firefox and
+Chrome 121+) and `::-webkit-scrollbar` sized 0 rather than `display: none` (older Blink/WebKit, where
+`display: none` hides the bar and leaves the gutter reserved). The case this exists for is ttyd: xterm's own
+CSS is `.xterm .xterm-viewport{overflow-y:scroll}` with no scrollbar styling, i.e. a bar that exists on
+every terminal pane whether or not there is any scrollback to show.
+
+Two things that follow from this and are worth knowing before changing it:
+
+- A pane whose content is taller than the pane is still scrollable: nothing here sets `overflow: hidden`
+  inside a pane, so the wheel and the keyboard still reach the pane's own document (and in a terminal,
+  whatever is running inside it). What is gone is the bar, and the area a bar used to occupy.
+- A pane whose upstream leaves the front's origin - a redirect the proxy follows out to another host - is
+  then genuinely a cross-origin document: the style cannot be injected into it and the desktop cannot help
+  it. That is the one case where a pane can still show a bar.
+
 ## Examples
+
 
 ```sh
 # The stack in docker-compose.yaml, and what it defaults to
@@ -242,3 +283,41 @@ docker run --rm -v "$PWD":/w:ro -w /w -e TEMPLATE_DIR=. \
 `grid-template-columns: 1fr`, upstream `home-ops.<namespace>.svc.cluster.local:7681` rewritten to the
 base path `home-ops` was started with) and the rejections: a bad `LAYOUT`, a bad `SVC_SUFFIX`, an empty
 desktop, a duplicated pane name and a reserved pane name.
+
+## The live front testbed
+
+A render check cannot say anything about how the desktop *looks*, so `hack/front-testbed.sh` runs the
+working tree's templates as a real container on the CI node's daemon and `hack/front-cdp.mjs` looks at it
+through the shared Chromium (`chromium.dev.initialed85.cc`) over CDP:
+
+```sh
+hack/front-testbed.sh up                       # renders the working tree; prints the URL to open
+hack/front-testbed.sh push index.html.template # cp into the running container, no restart (a restart re-renders)
+hack/front-testbed.sh probe hack/probe-scrollbars.js
+hack/front-testbed.sh cdp --url http://<node>:<port>/ --expression-file hack/probe-terminal.js \
+  --width 1280 --height 800 --shot /tmp/desktop.png
+hack/front-testbed.sh logs
+```
+
+CDP rather than the one-shot `/render`, `/screenshot` and `/eval` routes, for two reasons those routes do
+not cover: they evaluate before a pane's own script has run (xterm only exists once ttyd's websocket opens)
+and they cannot show the result of what an expression did, which is what measuring a layout change needs.
+`front-testbed.sh cdp` carries the bearer token in and passes the rest of its arguments through.
+
+The probe files are the measurements quoted under **Panes and scrollbars**: `probe-scrollbars.js` (page
+overflow, every label against its pane, whether the injected style landed in each pane), `probe-expand.js`
+(expanding a pane to the viewport still works with the page clipped), `probe-terminal.js` (a real ttyd
+pane's `.xterm-viewport`), `probe-scrollbox.js` with `scratch-scrollbox.html` (whether a bar takes layout
+space in a given browser at all).
+
+One trap in that environment, learned the hard way: a headless browser pointed at a *live* agent's pane
+attaches a ttyd client to that agent's tmux, and tmux sizes a window to its smallest client - so probing
+the deployed 20-pane desktop from an 800x600 headless tab resizes the terminals of every agent on it. Test
+against `https://example.com` panes carrying the same *names*, which reproduce the narrow-pane layout with
+no agent involved, and only point a pane at a real ttyd when it is your own agent.
+
+The other thing that environment cannot measure: this Chromium renders overlay scrollbars, so a bar reserves
+nothing there (a `::-webkit-scrollbar` forced to 15px reserves nothing, `scrollbar-gutter: stable` reserves
+nothing, and no bar is drawn at all). Overflow - the thing a browser turns into a bar - is measurable, and
+so is whether the injected rule landed and what the pane's own viewport computes; the width of the strip
+that a desktop browser would have taken is not.

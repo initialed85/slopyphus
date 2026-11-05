@@ -1,0 +1,121 @@
+<!doctype html>
+<!--
+  Scratch page for the front testbed (not part of the desktop, not templated by the entrypoint).
+
+  Question it answers: in this browser, does a scrollbar take layout space, and which rule gives that
+  space back. A headless Chrome renders overlay scrollbars, which reserve nothing and do not show up in
+  a screenshot at all, so every box here styles ::-webkit-scrollbar explicitly: a styled scrollbar is a
+  custom scrollbar, which is the classic kind that does take space. That is the closest reproduction of
+  what a desktop Chrome does to a pane, and it is the only way to see a bar in a headless screenshot.
+
+  Every box is 200x100 with 400x400 content, so a bar is certain on both axes. cw/ch is what the content
+  is left with; 185x85 means a 15px bar on each axis ate the space, 200x100 means it did not.
+
+  Put it in a running container with:
+    hack/front-testbed.sh push hack/scratch-scrollbox.html   # cp into /usr/share/nginx/html/scrollbox.html
+  Measure it with:
+    hack/front-testbed.sh probe hack/probe-scrollbox.js /scrollbox.html
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body {
+        margin: 0;
+        font: 11px monospace;
+        background: #111;
+        color: #ccc;
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+        padding: 4px;
+      }
+      .case {
+        width: 200px;
+      }
+      .box {
+        box-sizing: border-box;
+        width: 200px;
+        height: 100px;
+        overflow: scroll;
+        background: #222;
+      }
+      .box > div {
+        width: 400px;
+        height: 400px;
+        background: #345;
+      }
+      /* The variants. Each one is the only difference between two otherwise identical boxes. */
+      .baseline {
+        /* no scrollbar styling at all */
+      }
+      .webkit-display-none::-webkit-scrollbar {
+        display: none;
+      }
+      .webkit-zero::-webkit-scrollbar {
+        width: 0;
+        height: 0;
+      }
+      .standard-none {
+        scrollbar-width: none;
+      }
+      /* The control: a bar that is definitely there, definitely 15px, and red so a screenshot proves the
+         measurement is about a rendered scrollbar and not about a scrollbar that was never drawn. */
+      .forced::-webkit-scrollbar {
+        width: 15px;
+        height: 15px;
+        background: #f00;
+      }
+      .forced-then-zero::-webkit-scrollbar {
+        width: 15px;
+        height: 15px;
+        background: #f00;
+      }
+      /* Is "no space taken" a property of the rule, or of the custom-scrollbar mode itself? Same box, but
+         the second scrollbar rule cancels the size while keeping the custom mode. */
+      .forced-then-zero::-webkit-scrollbar {
+        width: 0;
+        height: 0;
+        background: #0a0;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="row" id="row"></div>
+    <script>
+      var cases = [
+        ["baseline", ""],
+        ["webkit-display-none", "webkit-display-none"],
+        ["webkit-zero", "webkit-zero"],
+        ["standard-none", "standard-none"],
+        ["forced", "forced"],
+        ["forced-then-zero", "forced-then-zero"],
+      ];
+      var row = document.getElementById("row");
+      var results = cases.map(function (c) {
+        var wrap = document.createElement("div");
+        wrap.className = "case";
+        var label = document.createElement("div");
+        label.textContent = c[0];
+        var box = document.createElement("div");
+        box.className = "box " + c[1];
+        box.innerHTML = "<div></div>";
+        wrap.appendChild(label);
+        wrap.appendChild(box);
+        row.appendChild(wrap);
+        // Forced reflow: reading clientWidth is the number that answers the question.
+        var text = document.createElement("div");
+        text.textContent =
+          "cw=" + box.clientWidth + " ch=" + box.clientHeight + " taken=" + (box.offsetWidth - box.clientWidth) + "x" + (box.offsetHeight - box.clientHeight);
+        wrap.appendChild(text);
+        return c[0] + " " + text.textContent;
+      });
+      document.title = "scrollbox";
+      var out = document.createElement("pre");
+      out.textContent = results.join("\n");
+      document.body.appendChild(out);
+      window.results = results;
+    </script>
+  </body>
+</html>
