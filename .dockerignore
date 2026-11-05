@@ -1,0 +1,13 @@
+# The agent image needs a handful of files (the tmux config, the entrypoint, the four pi extensions) and
+# two build contexts (vendor/ttyd for the ttyd builder stage). Everything else is either history or
+# scratch, and the build context is shipped over the wire to the daemon on every build:
+#
+#   .git            60M of it, and no instruction reads it
+#   vendor/xterm.js   the fork is only needed by hack/build-ttyd-client.sh, which runs in a container of
+#                     its own; the image build consumes the generated header committed in vendor/ttyd
+#   hack/           testbed scripts, CDP probes and screenshots
+.git
+vendor/xterm.js
+hack
+**/node_modules
+*.png

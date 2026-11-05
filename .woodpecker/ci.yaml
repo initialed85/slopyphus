@@ -40,6 +40,28 @@ steps:
       - docker info --format 'daemon={{.Name}} images_before={{.Images}}'
       - docker build --pull --progress=plain -t initialed85/slopyphus:$CI_COMMIT_SHA -f ./Dockerfile .
       - docker build --pull --progress=plain -t initialed85/slopyphus-nginx:$CI_COMMIT_SHA -f ./Dockerfile.nginx .
+      # The agent's ttyd is compiled from vendor/ttyd, so the build only means something if the checkout
+      # actually carries the vendored sources. plugin-git clones submodules recursively by default
+      # (`recursive: true`, `submodule-partial: true` at depth 1), which checks out the pinned commit
+      # rather than a branch tip - so these two tests are really asserting that the pins are real.
+      - "test -s vendor/ttyd/src/html.h || (echo 'FAIL: vendor/ttyd is not populated (git submodule update --init --recursive)'; exit 1)"
+      - "test -s vendor/xterm.js/package.json || (echo 'FAIL: vendor/xterm.js is not populated'; exit 1)"
+      # `ttyd --version` is the only evidence inside a running container of which ttyd is serving a pane,
+      # and the -slopyphus suffix comes from a hunk in the fork's CMakeLists.txt that a rebase onto
+      # upstream can silently drop. The builder stage greps for it too; this is the same check against
+      # the shipped image instead of the intermediate one.
+      - "docker run --rm --entrypoint ttyd initialed85/slopyphus:$CI_COMMIT_SHA --version | grep slopyphus"
+      # The fork links against shared libraries apt would otherwise have pulled in for ttyd's package;
+      # an unresolved `ldd` line is an image that starts and then fails the first time a pane asks for
+      # ttyd, which is the worst possible time to find out.
+      - "if docker run --rm --entrypoint ldd initialed85/slopyphus:$CI_COMMIT_SHA /usr/bin/ttyd | grep 'not found'; then echo 'FAIL: the forked ttyd has unresolved libraries in the agent image'; exit 1; fi"
+      - "echo 'agent ttyd links resolve'"
+      # And the failure `ldd` cannot see: libwebsockets dlopens its libuv event loop plugin, so a missing
+      # libwebsockets-evlib-uv leaves a binary with a perfectly clean `ldd` that still refuses to start
+      # (`lws_create_context: failed to load evlib_uv`). This check was written after that exact mistake,
+      # not before it.
+      - "if docker run --rm --entrypoint timeout initialed85/slopyphus:$CI_COMMIT_SHA 5 ttyd -p 7699 true 2>&1 | grep -q 'failed to load evlib'; then echo 'FAIL: libwebsockets cannot load its libuv plugin in the agent image'; exit 1; fi"
+      - "echo 'agent ttyd starts (event loop plugin loads)'"
       - docker images --format '{{.Repository}}:{{.Tag}} {{.Size}}' | grep slopyphus || true
       - docker system df
 

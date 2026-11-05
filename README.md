@@ -6,7 +6,7 @@ Two images:
 
 | image | built from | what it is |
 | --- | --- | --- |
-| `initialed85/slopyphus` | `Dockerfile` | one agent: ubuntu, tmux, ttyd, pi, trzsz, docker-cli, uv, go, node, kubectl |
+| `initialed85/slopyphus` | `Dockerfile` | one agent: ubuntu, tmux, ttyd (built from `vendor/ttyd`, see **Forks**), pi, trzsz, docker-cli, uv, go, node, kubectl |
 | `initialed85/slopyphus-nginx` | `Dockerfile.nginx` | the UI: nginx plus an entrypoint that renders its config from environment variables |
 
 The repo used to be `slophyphus` (a stray h) while the images were always `initialed85/slopyphus`; the
@@ -172,9 +172,9 @@ The desktop itself is a fixed grid, so it has nothing to scroll to and says so (
 - An `iframe` is `display: block`. By default an iframe is an *inline replaced* element, so it sits on a
   text baseline and the line box is the iframe plus the font's descent below it: 3px at 12px monospace, at
   every viewport size, which is a vertical scrollbar on the desktop.
-- A pane's label is clipped to the pane (`max-width`, `text-overflow: ellipsis`), so a long name cannot be
-  overflow the grid has to accommodate: an absolutely positioned label is overflow its cell does not stop,
-  and that overflow reaches the viewport, which is where a horizontal scrollbar comes from.
+- A pane's label is clipped to the pane (`max-width`, `text-overflow: ellipsis`), so a long name cannot
+  produce overflow the grid has to accommodate: an absolutely positioned label is overflow its cell does
+  not stop, and that overflow reaches the viewport, which is where a horizontal scrollbar comes from.
 
 Inside a pane is a different problem, because the page above cannot style the document in an iframe. Every
 upstream is framed through nginx under the front's own origin, so the pane is same-origin and the script
@@ -249,11 +249,50 @@ Two things that file documents rather than repeats:
 - the credentials are a Secret applied by hand, so nothing in the app starts until somebody brings it up,
   which is the deliberate gate on "are the credentials in yet".
 
-`ttyd` 1.7.7 is stock here. Two of its flags matter to this design and neither is currently used:
-`-b/--base-path` is what the entrypoint relies on, and `-O/--check-origin` is *not* passed, so ttyd does
-not police the `Origin` header - which is what lets a websocket handshake arriving over TLS at Traefik
-reach a plain-HTTP ttyd. If that is ever tightened, `-H/--auth-header` is the flag that lets ttyd trust
-the identity headers the gate injects instead of doing its own auth.
+`ttyd` here is built from `vendor/ttyd`, not installed from apt, and the reasons are in **Forks** below.
+Two of its flags matter to this design and neither is currently used: `-b/--base-path` is what the
+entrypoint relies on, and `-O/--check-origin` is *not* passed, so ttyd does not police the `Origin`
+header - which is what lets a websocket handshake arriving over TLS at Traefik reach a plain-HTTP ttyd.
+If that is ever tightened, `-H/--auth-header` is the flag that lets ttyd trust the identity headers the
+gate injects instead of doing its own auth.
+
+# Forks
+
+The two programs the desktop is made of are vendored as submodules, on branches we own, because the work
+ahead of this repo happens in them rather than around them:
+
+| submodule | fork of | pinned at | branch |
+| --- | --- | --- | --- |
+| `vendor/ttyd` | `tsl0922/ttyd` | `1.7.7` | `slopyphus` |
+| `vendor/xterm.js` | `xtermjs/xterm.js` | `5.4.0` (the version ttyd's client pins) | `slopyphus` |
+
+- `Dockerfile` compiles the agent's `ttyd` in a `ttyd-builder` stage and `COPY`s the binary to
+  `/usr/bin/ttyd`, the path apt would have used, so nothing that resolves `ttyd` by name knows the
+  difference. The binary says what it is: `ttyd --version` is `1.7.7-slopyphus`, the suffix comes from a
+  hunk in the fork's `CMakeLists.txt`, and both the builder stage and the CI gate fail if it is missing -
+  a rebase onto upstream can drop that hunk without any other symptom.
+- The browser client is not built by the image build at all. It is `vendor/ttyd/src/html.h`, a generated
+  header holding the gzipped, inlined `index.html` that upstream commits, so the client is a *source file*
+  of the binary. That is why the two forks are not enough on their own: `hack/build-ttyd-client.sh` is the
+  thing that joins them. It builds `@xterm/xterm` from `vendor/xterm.js`, points ttyd's `package.json` at
+  that build in a copy of the tree (never in the checkout, so ttyd stays buildable on its own), runs the
+  webpack plus gulp build, and writes the header back into the fork. The header is then committed on the
+  fork's `slopyphus` branch and the pin in this repo moves with it.
+- `hack/build-ttyd-client.sh --check` answers "would this rebuild change anything?" by comparing the
+  *decompressed* payload (`hack/html-h-payload.mjs`), because the gzip member stores an mtime and two
+  builds of identical content do not hash the same. An unmodified fork reproduces the client upstream
+  shipped, payload for payload - that is the baseline this repo is at, and it is what makes the first real
+  patch to xterm.js a legible diff instead of a pile of build noise.
+- The client build runs in a container on the CI node's dockerd, like the front testbed. ttyd's client is
+  pinned to yarn 3.6.3 by its `packageManager` field and xterm.js wants yarn 1, and Ubuntu's `nodejs` plus
+  `corepack` is what supplies both; the container also installs `ca-certificates`, because without a trust
+  store corepack reports a TLS failure as a network error, which is a very misleading way to spell it.
+
+Where the work lands, for the record: drag/drop and paste images belong in ttyd's client
+(`html/src/components/terminal.tsx`), which already holds the terminal's websocket and can send bytes down
+it; the `@xterm/xterm` fork is for what the terminal itself has to know about (rendering an image, and
+xterm's own `.xterm .xterm-viewport{overflow-y:scroll}`, which is the bar every terminal pane carries and
+that the front currently has to inject a style over - see **Panes and scrollbars**).
 
 # Checks
 
@@ -321,3 +360,32 @@ nothing there (a `::-webkit-scrollbar` forced to 15px reserves nothing, `scrollb
 nothing, and no bar is drawn at all). Overflow - the thing a browser turns into a bar - is measurable, and
 so is whether the injected rule landed and what the pane's own viewport computes; the width of the strip
 that a desktop browser would have taken is not.
+
+## Proving the forked terminal actually works
+
+The gate asserts the build (`ttyd --version` names the fork, `ldd` resolves, a real ttyd from the shipped
+image starts) and nothing about the client, because there is no browser in a CI step. This is the
+sequence that closes that gap; it is what was run for `1.7.7-slopyphus`, against the CI node's daemon:
+
+```sh
+# 1. the client, from the forks, into the header the binary embeds
+hack/build-ttyd-client.sh --check        # would a rebuild change anything? (payload compare)
+hack/build-ttyd-client.sh               # write it, then commit in the fork and re-pin here
+
+# 2. the agent image, and the ttyd it ships
+DOCKER_HOST=tcp://192.168.1.213:2375 docker build --platform=linux/amd64 -t probe:local .
+docker run --rm --entrypoint ttyd probe:local --version          # 1.7.7-slopyphus
+docker run --rm --entrypoint ldd  probe:local /usr/bin/ttyd      # nothing 'not found'
+
+# 3. serve it, and look at it in the shared Chromium
+DOCKER_HOST=tcp://192.168.1.213:2375 docker run -d --name probe -p 0.0.0.0:38139:7681 \
+  --entrypoint /usr/bin/ttyd probe:local -p 7681 -i 0.0.0.0 -b /test bash
+CHROMIUM_TOKEN=$(kubectl -n auth get secret api-tokens -o jsonpath='{.data.API_TOKEN_EDWARD}' | base64 -d) \
+  node hack/front-cdp.mjs --url http://192.168.1.213:38139/test/ \
+    --expression-file hack/probe-fork-terminal.js --wait-ms 4000 --shot /tmp/terminal.png
+```
+
+The result that matters is `title` in the probe output and the prompt in the screenshot: the title is set
+by ttyd's client from the shell's OSC sequence, which arrives over the websocket, so a real title is proof
+that the forked client connected, negotiated, and rendered a live shell. The `--writable` flag is not
+needed for that and its absence is why the probe container's terminal is read-only.

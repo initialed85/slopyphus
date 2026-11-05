@@ -1,9 +1,36 @@
+# syntax=docker/dockerfile:1
+#
+# ttyd comes from vendor/ttyd, not from apt. That submodule is initialed85/ttyd, a fork of tsl0922/ttyd
+# pinned to 1.7.7 — the same release apt installs — and the point of owning it is the browser client:
+# ttyd embeds its whole UI as a generated header (src/html.h) whose xterm.js half is built from
+# vendor/xterm.js, also a fork, by hack/build-ttyd-client.sh. The image build therefore needs no node
+# toolchain at all: it compiles the header that is already committed in the fork. See README.md.
+FROM ubuntu:26.04 AS ttyd-builder
+
+RUN apt update && \
+    apt install -y --no-install-recommends build-essential cmake libwebsockets-dev libjson-c-dev libuv1-dev zlib1g-dev
+
+COPY vendor/ttyd /src/ttyd
+WORKDIR /src/ttyd
+
+RUN cmake -B build -DCMAKE_BUILD_TYPE=Release && \
+    cmake --build build --parallel "$(nproc)" && \
+    install -m 0755 build/ttyd /usr/local/bin/ttyd && \
+    /usr/local/bin/ttyd --version | grep -q slopyphus
+
 FROM ubuntu:26.04
 
 SHELL ["/bin/bash", "-lic"]
 
+# ttyd is deliberately absent here: the binary is COPY'd from the builder stage above. What is installed
+# are the libraries that binary needs, and `ldd` is not enough to answer that: libwebsockets loads its
+# libuv event loop plugin by dlopen (`lws_create_context: failed to load evlib_uv` is how it complains,
+# at start, in a way that looks like a ttyd bug and not a missing package), so the .so is a runtime
+# dependency that no linker output mentions. libuv1t64 and friends are the t64-renamed runtime packages
+# Ubuntu 26.04 uses; the names come from `dpkg -S` on the .so paths, not from guessing.
 RUN apt update && \
-    apt install -y tmux ttyd curl unzip ca-certificates ripgrep fd-find libatomic1 locales software-properties-common && \
+    apt install -y tmux curl unzip ca-certificates ripgrep fd-find libatomic1 locales software-properties-common \
+        zlib1g libjson-c5 libuv1t64 libssl3t64 libcap2 libzstd1 libwebsockets19t64 libwebsockets-evlib-uv && \
         locale-gen en_US.UTF-8 && \
         update-locale LANG=en_US.UTF-8
 
@@ -54,6 +81,11 @@ RUN bash -c 'curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/
 
 COPY .tmux.conf /root/.tmux.conf
 COPY docker-entrypoint.sh /docker-entrypoint.sh
+
+# The fork's binary, at the same path apt would have used, so anything that resolves `ttyd` by name
+# (docker-entrypoint.sh, an agent's own shell) finds it without knowing the difference.
+COPY --from=ttyd-builder /usr/local/bin/ttyd /usr/bin/ttyd
+RUN ttyd --version && ttyd --version | grep -q slopyphus
 
 RUN mkdir -p /root/.pi/agent/extensions
 COPY compaction-summary-guard.ts loop-guard.ts queue-reload.ts session-commands.ts /root/.pi/agent/extensions/

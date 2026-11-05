@@ -1,0 +1,8 @@
+[submodule "vendor/ttyd"]
+	path = vendor/ttyd
+	url = https://github.com/initialed85/ttyd
+	branch = slopyphus
+[submodule "vendor/xterm.js"]
+	path = vendor/xterm.js
+	url = https://github.com/initialed85/xterm.js
+	branch = slopyphus

@@ -87,6 +87,25 @@ container are output, not source- edit the template or the environment, never th
   Reproduce a layout with panes that are *names* pointing at `https://example.com`; do not point a headless
   probe at a live agent's ttyd, because tmux sizes a window to its smallest client.
 
+# The vendored forks (ttyd, xterm.js)
+
+The agent's `ttyd` is compiled from `vendor/ttyd` (fork of `tsl0922/ttyd`, working branch `slopyphus`), and
+its browser client is built from `vendor/xterm.js` (fork of `xtermjs/xterm.js`, branch `slopyphus`). Both
+are pinned by commit, not by branch, so `git submodule update --init --recursive` is what CI builds.
+
+- `vendor/ttyd/src/html.h` is a generated file that upstream commits: the gzipped, inlined UI the binary
+  embeds. Edit the client (`vendor/ttyd/html/**`, `vendor/xterm.js/**`), then run
+  `hack/build-ttyd-client.sh` to regenerate the header, then commit the header **in the fork** and re-pin
+  the submodule here. Never hand-edit `html.h`, and never edit the rendered copy inside a container.
+- The image build runs no node toolchain: it compiles the committed header. A client change that has not
+  been regenerated and committed in the fork is therefore invisible in the image, which is the failure
+  mode to watch for when a terminal change "does not deploy".
+- `ttyd --version` must say `1.7.7-slopyphus`. The suffix is a hunk in the fork's `CMakeLists.txt`, and
+  both the `Dockerfile` builder stage and `.woodpecker/ci.yaml` assert it, so a rebase onto upstream that
+  drops it fails the build.
+- Pushing a fork from this pod needs the ssh remote (`git@github.com:initialed85/ttyd`); the https url in
+  `.gitmodules` stays, because that is what CI's clone uses and it works without credentials.
+
 # Reusable services
 
 See `/root/.pi/agent/SERVICES.md` for reusable services
