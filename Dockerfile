@@ -30,12 +30,13 @@ SHELL ["/bin/bash", "-lic"]
 # Ubuntu 26.04 uses; the names come from `dpkg -S` on the .so paths, not from guessing.
 RUN apt update && \
     apt install -y tmux curl unzip ca-certificates ripgrep fd-find libatomic1 locales software-properties-common \
-        zlib1g libjson-c5 libuv1t64 libssl3t64 libcap2 libzstd1 libwebsockets19t64 libwebsockets-evlib-uv && \
+        zlib1g libjson-c5 libuv1t64 libssl3t64 libcap2 libzstd1 libwebsockets19t64 libwebsockets-evlib-uv tzdata && \
         locale-gen en_US.UTF-8 && \
         update-locale LANG=en_US.UTF-8
 
 ENV LANG=en_US.UTF-8
 ENV LC_ALL=en_US.UTF-8
+ENV TZ=Australia/Perth
 
 RUN add-apt-repository ppa:trzsz/ppa
 RUN apt update && apt install -y trzsz libsixel-bin
