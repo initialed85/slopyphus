@@ -106,6 +106,13 @@ are pinned by commit, not by branch, so `git submodule update --init --recursive
 - Pushing a fork from this pod needs the ssh remote (`git@github.com:initialed85/ttyd`); the https url in
   `.gitmodules` stays, because that is what CI's clone uses and it works without credentials.
 
+# Committing from inside an agent pod
+
+- The clone an agent pod boots with has no git identity, so `git commit` fails with `Author identity unknown`
+  until `git config user.name edwardbeech && git config user.email edward@initialed85.cc` is run in that
+  repository. Repo-local on purpose: the identity belongs to the commits, and a global setting would follow
+  the machine rather than the repo.
+
 # Reusable services
 
 See `/root/.pi/agent/SERVICES.md` for reusable services

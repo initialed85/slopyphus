@@ -230,8 +230,17 @@ Argo rolls, and `git revert` is the rollback. `build-tag-and-push.sh` does the s
 dirty one claims the image is bytes it was not built from).
 
 The gate is a separate file on purpose: `.woodpecker/ci.yaml` decides whether a change is acceptable,
-`.woodpecker/build.yaml` decides what is in the registry. On a push to `master` both run, the second one
-against the same node and mostly `CACHED`.
+`.woodpecker/build.yaml` decides what is in the registry. On a push to `master` the gate always runs - a gate
+that can be skipped is not a gate - and the publish runs unless every file in the commit is one the images
+cannot contain (`PLAN.md`, `README.md`, `_AGENTS.md`, `docs/**`, `.slopyphus/**`, `hack/**`, `.woodpecker/**`
+- derived from what the two Dockerfiles actually `COPY`, not from what a file is called). Without that filter
+a commit that changed only prose still published a new tag, and stamping a tag into the manifest restarts
+every agent pod, which kills every Pi session running in it. The first commit tested against the filter
+changed `PLAN.md`, `.woodpecker/build.yaml` and six `hack/` probes: the CI node ended up with an image tagged
+with that commit's sha, so a build ran, while home-ops' `kustomization.yaml` stayed on the previous sha and
+no pod restarted. That is confirmed by the absence of a deploy commit and a rollout, not by reading the
+pipeline - this pod cannot reach Woodpecker's API, which sits behind the same Google gate as its UI - so the
+next commit that touches something an image contains is the check that the publish still runs.
 
 # Deploying it
 
