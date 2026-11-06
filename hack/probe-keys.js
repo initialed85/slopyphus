@@ -12,6 +12,13 @@
  *    KeyboardEventInit because the property is deprecated. Without defineProperty, Enter is not Enter.
  *  - text goes in as an `insertText` input event rather than as letter keydowns, because the point of the
  *    measurement is which *control* byte a key produces; markers just label which case a byte belongs to.
+ *
+ * And one thing here is a limitation to know before trusting a result: these events are built with
+ * `new KeyboardEvent(...)` and dispatched from page script, which produces keydown and keyup but never
+ * keypress - and xterm.js writes terminal data from both. A handler that mishandles keypress passes this
+ * probe and fails in a real browser, which is exactly what happened to the Shift+Enter handler. For anything
+ * about keys, press them through Chrome's input pipeline instead: hack/front-cdp.mjs --key 'shift+Enter'
+ * (rawKeyDown, then char, then keyUp, in that order).
  *    xterm passes an insertText event straight through to the pty (browser/Terminal.ts, the
  *    `inputType === 'insertText'` branch).
  *

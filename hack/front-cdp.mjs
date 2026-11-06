@@ -50,6 +50,39 @@ function arg(name, fallback) {
 }
 const has = (name) => process.argv.includes(`--${name}`);
 
+// Ordered --key list, and the CDP modifier bitmask Chrome expects (alt 1, ctrl 2, meta 4, shift 8).
+const keySpecs = [];
+for (let i = 0; i < process.argv.length; i++) {
+  if (process.argv[i] === "--key") keySpecs.push(process.argv[i + 1]);
+}
+const keyGapMs = Number(arg("key-gap-ms", 220));
+const CDP_MODIFIERS = { alt: 1, ctrl: 2, meta: 4, shift: 8 };
+const NAMED_KEYS = {
+  Enter: { vk: 13, code: "Enter", text: "\r" },
+  Escape: { vk: 27, code: "Escape" },
+  Tab: { vk: 9, code: "Tab", text: "\t" },
+  Space: { vk: 32, code: "Space", text: " " },
+  Backspace: { vk: 8, code: "Backspace" },
+};
+
+function parseKeySpec(spec) {
+  const parts = String(spec).split("+");
+  const name = parts.pop();
+  let modifiers = 0;
+  for (const p of parts) {
+    if (!CDP_MODIFIERS[p]) throw new Error(`--key: unknown modifier '${p}' in '${spec}'`);
+    modifiers |= CDP_MODIFIERS[p];
+  }
+  const named = NAMED_KEYS[name];
+  if (named) return { key: name, code: named.code, vk: named.vk, text: named.text, modifiers };
+  if (name.length === 1) {
+    const upper = name.toUpperCase();
+    const shift = (modifiers & CDP_MODIFIERS.shift) !== 0;
+    return { key: shift ? upper : name, code: `Key${upper}`, vk: upper.charCodeAt(0), text: shift ? upper : name, modifiers };
+  }
+  throw new Error(`--key: unsupported key '${name}' in '${spec}'`);
+}
+
 const url = arg("url", "about:blank");
 const expressionFile = arg("expression-file", "");
 const waitMs = Number(arg("wait-ms", 3000));
@@ -151,8 +184,31 @@ const loaded = new Promise((resolve) => {
   poll.unref?.();
 });
 
-const outcome = { targetId: target.targetId, tab: target.reused, tabsBefore, tabsAfter: 0, load: null, value: null, error: null };outcome.load = await loaded;
+const outcome = { targetId: target.targetId, tab: target.reused, tabsBefore, tabsAfter: 0, load: null, value: null, error: null };
+outcome.load = await loaded;
 await new Promise((r) => setTimeout(r, waitMs)); // xterm, websockets and lazy layout are not load events
+
+// Keys go through Chrome's input pipeline, so a press produces keydown, keypress (when the key carries
+// text) and keyup the way a physical keyboard does. Focus first: Chrome delivers key events to the focused
+// element, and a headless page has nothing focused.
+if (keySpecs.length) {
+  // Focus is what routes a key event, and a headless page has nothing focused. The default targets a bare
+  // ttyd pane; a pane framed by the desktop needs the expression to reach into the iframe instead, so it is
+  // configurable rather than guessed at.
+  const focusExpression = arg(
+    "focus-expression",
+    `(() => { const t = document.querySelector('.xterm-helper-textarea'); t && t.focus(); return !!t; })()`,
+  );
+  await send("Runtime.evaluate", { expression: focusExpression }, sessionId);
+  for (const spec of keySpecs) {
+    const { key, code, vk, text, modifiers } = parseKeySpec(spec);
+    const base = { key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers };
+    await send("Input.dispatchKeyEvent", { type: "rawKeyDown", ...base }, sessionId);
+    if (text) await send("Input.dispatchKeyEvent", { type: "char", ...base, text }, sessionId);
+    await send("Input.dispatchKeyEvent", { type: "keyUp", ...base }, sessionId);
+    await new Promise((r) => setTimeout(r, keyGapMs));
+  }
+}
 
 if (expressionFile) {
   const expression = readFileSync(expressionFile, "utf8");

@@ -69,7 +69,8 @@ Steps:
 ## Task 2 — Shift+Enter without the front door
 
 Status: **implemented in the fork and measured on all three paths** (direct ttyd path, ttyd through
-tmux, ttyd framed by the front desktop).
+tmux, ttyd framed by the front desktop). The first version passed its own measurement and failed in a real
+browser; the keypress finding below is why the feature is now correct rather than nearly correct.
 
 Observed: works through the slopyphus front (nginx synthesises a Ctrl+J key event into the iframe),
 broken when a ttyd path is opened directly (`https://slopyphus.../home-ops/`).
@@ -109,22 +110,41 @@ Fix shipped:
   in the source *and* in the decompressed `vendor/ttyd/src/html.h`, so a dependency refresh that drops the
   handler fails the build instead of shipping a silent regression.
 
-Measured acceptance — bytes on the application's stdin (`od -An -c`), not screenshot-level assertions:
+Measured acceptance — bytes on the application's stdin (`od -An -c`), not screenshot-level assertions, with
+the pane's application in raw mode and keys pressed through Chrome's own input pipeline (`hack/front-cdp.mjs
+--key 'shift+Enter'`, dispatched as rawKeyDown → char → keyUp):
 
-| keystroke | direct ttyd path | ttyd → tmux 3.6 | ttyd framed by the front desktop |
-| --- | --- | --- | --- |
-| Enter | `\r` | `\r` | `\r` |
-| Shift+Enter | `\n` | `\n` | `\n` |
-| Ctrl+J | `\n` | `\n` | `\n` |
-| Alt+Enter | `033 \r` | `033 \r` | not typed |
-| Shift+Enter mid-line | `\n` | `\n` | not typed |
+| keystroke | direct ttyd path, production `-t` flags, ttyd → tmux 3.6 | ttyd framed by the front desktop |
+| --- | --- | --- |
+| Enter | `b \r` | `b \r` |
+| Shift+Enter | `b \n` | `b \n` |
+| Shift+Enter again, mid-line | `b \n` | `b \n` |
+| Alt+Enter | `b 033 \r` | `b 033 \r` |
+| Enter again | `b \r` | `b \r` |
+
+Each press is delimited by a `b` typed with a real key event too, so ordinary typing is checked in the same
+run and a duplicated or missing byte shows up as a missing or extra delimiter rather than a mystery.
+
+The first version of this handler passed the earlier version of that measurement and still did not work in a
+browser, and that is the finding worth keeping. A `KeyboardEvent` built in JavaScript and dispatched at
+xterm's helper textarea produces keydown and keyup but never **keypress**, and xterm.js writes terminal data
+from both: `_keyDown` sets `_keyDownHandled` only on the way through `cancel()`, and a custom handler that
+returns false returns before either point, so the flag stays false - while `_keyPress` skips itself only when
+that flag is true. The browser's keypress for the same Enter therefore reached `_keyPress`, took
+`String.fromCharCode(charCode)` - 13, a CR - and wrote it *after* our LF: Shift+Enter inserted a newline and
+then submitted the line, in that order, which is what it looked like from the pane. The capture that had
+"proved" the handler working was measured with synthetic events, so it could not see the second half of the
+keystroke at all. Fixed by refusing that keystroke on keypress as well, and cancelling the keydown default,
+which is a linefeed inserted into the helper textarea; re-measured through Chrome's input pipeline on both
+paths, with the production `-t` flag set rather than a testbed's defaults.
 
 Tools, in increasing amount of browser: `hack/ttyd-ws-probe.mjs` drives ttyd's websocket protocol with no
 browser at all (`0` + UTF-8 for input, `1` + JSON for resize, `--send` per frame), so tmux's own key
-translation can be measured with exact bytes; `hack/probe-keys.js` types through a real Chromium over CDP
-and reports console warnings; `hack/probe-front-keys.js` types into the front desktop's iframe and reports
-page-level errors, which is what catches a torn-out helper in the template before anything about keys is
-worth reading.
+translation can be measured with exact bytes; `hack/front-cdp.mjs --key` presses keys through Chrome's input
+pipeline and is the only thing in this repo that produces the keypress half of a keystroke; and
+`hack/probe-keys.js` / `hack/probe-front-keys.js` evaluate inside a page to read what the client logged and
+what errors the desktop raised - right for warnings and torn-out template helpers, and now explicitly not the
+tool for key behaviour, for the reason above.
 
 Trap found on the way, also fixed: a `name=url` pane in the front renders `proxy_set_header Host …` in its
 own location block, and nginx replaces an inherited directive *set* wholesale the moment a nested block
