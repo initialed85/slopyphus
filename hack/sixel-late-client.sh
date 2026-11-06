@@ -62,6 +62,9 @@ run() {
   tmux -L "$name" new-session -d -s w bash
   rm -f "/tmp/$name.log" "/tmp/$name.pane.bin"
   tmux -L "$name" pipe-pane -t w "cat > /tmp/$name.pane.bin"
+  # Read against this case's own server: `tmux display -p` on a server that is not running yet just errors, and
+  # a probe that prints "no server" where a number was expected is how the wrong conclusion got written down once.
+  echo "  server compiled-in support in this case: #{sixel_support} = $(tmux -L "$name" display -p '#{sixel_support}')"
   # script(1) gets /dev/null on stdin or it swallows the rest of this file as terminal input, and the attach is
   # ended by its own timeout rather than by a pattern kill, which would take script down with it.
   if [ "$attach_first" = 1 ]; then
@@ -82,6 +85,5 @@ run() {
 
 echo "== tmux $(tmux -V): sixel printed into a pane, client attached first vs attaching afterwards"
 echo "== client TERM=xterm-256color (a plain attach, not ttyd's xterm.js), allow-passthrough off"
-echo "== server compiled-in support: #{sixel_support} = $(tmux display -p '#{sixel_support}' 2>/dev/null || echo 'no server running yet')"
 run attached-first 1
 run late-client 0
