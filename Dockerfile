@@ -91,6 +91,15 @@ RUN ttyd --version && ttyd --version | grep -q slopyphus
 RUN mkdir -p /root/.pi/agent/extensions
 COPY compaction-summary-guard.ts loop-guard.ts queue-reload.ts session-commands.ts /root/.pi/agent/extensions/
 
+# Inline images for a pane. tmux discards a bare OSC 1337 and Pi's fullscreen TUI switches its own image output
+# off before it starts, so neither half of the problem is fixed by the other: tools/pi-images.sh runs Pi in the
+# mode where images are emitted at all, and tools/tmux-osc-wrap.py wraps whatever the program writes into the DCS
+# tmux is willing to carry. Neither is wired into the pane command; `pi-images` is a command a person runs.
+RUN mkdir -p /usr/local/share/slopyphus
+COPY tools/tmux-osc-wrap.py /usr/local/share/slopyphus/tmux-osc-wrap.py
+COPY tools/pi-images.sh /usr/local/bin/pi-images
+RUN chmod 0755 /usr/local/share/slopyphus/tmux-osc-wrap.py /usr/local/bin/pi-images
+
 WORKDIR /workspace
 
 RUN pi update && pi update --extensions

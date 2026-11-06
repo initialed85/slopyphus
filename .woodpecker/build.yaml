@@ -32,9 +32,11 @@
 # The semantics being relied on: with `exclude` alone, a pipeline runs unless every changed file matches an
 # excluded pattern. The list is derived from the build context rather than from what a file is called: the two
 # Dockerfiles copy vendor/ttyd, .tmux.conf, docker-entrypoint*.sh, the ttyd binary out of the builder stage,
-# the four Pi extension .ts files, and nginx.conf.template / index.html.template. Everything under hack/ and
-# .woodpecker/ is tooling that runs against the images from outside them, so a change there cannot move a
-# layer. vendor/**, the entrypoints, the templates, the Pi extensions and the Dockerfiles stay unlisted.
+# Dockerfiles copy vendor/ttyd, .tmux.conf, docker-entrypoint*.sh, the ttyd binary out of the builder stage,
+# the four Pi extension .ts files, tools/tmux-osc-wrap.py and tools/pi-images.sh, and nginx.conf.template /
+# index.html.template. Everything under hack/ and .woodpecker/ is tooling that runs against the images from
+# outside them, so a change there cannot move a layer. vendor/**, tools/**, the entrypoints, the templates, the
+# Pi extensions, the Dockerfiles and the extension .ts files at the repository root stay unlisted.
 #
 # Credentials are native Kubernetes Secrets in the `woodpecker` namespace, mapped to env by
 # `backend_options.kubernetes.secrets` (needs `WOODPECKER_BACKEND_K8S_ALLOW_NATIVE_SECRETS=true` on the

@@ -66,8 +66,15 @@ SEQ_MUX_B64=$(node hack/pi-image-bytes.mjs "$TEST_IMAGE" --wrap-tmux | base64 -w
 SEQ_ST_B64=$(node hack/pi-image-bytes.mjs "$TEST_IMAGE" --st | base64 -w0)
 SEQ_ST_MUX_B64=$(node hack/pi-image-bytes.mjs "$TEST_IMAGE" --st --wrap-tmux | base64 -w0)
 # The live shim rather than a pre-wrapped file: the pi-shim case hands the raw Pi sequence to a program running
-# under hack/tmux-osc-wrap.py, which is the shape production would have if this works.
-SHIM_B64=$(base64 -w0 hack/tmux-osc-wrap.py)
+# under tools/tmux-osc-wrap.py, which is the shape production would have if this works.
+SHIM_B64=$(base64 -w0 tools/tmux-osc-wrap.py)
+# Pi's own graphics output, lifted out of a live Pi session rather than reassembled by hand. Pi emits inline
+# images in its alt-screen UI only through the kitty graphics protocol (the iterm2 path is switched off by
+# beforeTerminalStart), so this fixture is what a pane running Pi actually contains: a transmit-and-display,
+# three re-plots of the same image id, and the delete calls.
+KITTY_B64=$(base64 -w0 hack/fixtures/pi-kitty-pi-tui.bin)
+KITTY_MUX_B64=$(python3 hack/wrap-tmux-dcs.py hack/fixtures/pi-kitty-pi-tui.bin | base64 -w0)
+TUI_CAPTURE_B64=$(base64 -w0 hack/fixtures/pi-tui-kitty-capture.bin)
 
 write_case_scripts() {
   # Each script recreates its own input inside the container, so a case is a single file that can be pasted
@@ -110,13 +117,40 @@ echo CASE-RAN-MARKER
 EOS
 
   cat >"$WORK/case-pi-shim.sh" <<EOS
-# hack/tmux-osc-wrap.py relaying a program and wrapping OSC 1337 as it goes. It wraps only when TMUX is set, so
+# tools/tmux-osc-wrap.py relaying a program and wrapping OSC 1337 as it goes. It wraps only when TMUX is set, so
 # the bare variant of this case is the raw Pi sequence through a relay that decided to do nothing, and the tmux
 # variant is the same bytes wrapped. CASE-INNER-MARKER proves the relayed program ran to completion;
 # CASE-RAN-MARKER proves the pane carried on after the image, which is what a wrong wrapper terminator destroys.
 echo '$SEQ_B64' | base64 -d > /tmp/pi-seq.bin
 echo '$SHIM_B64' | base64 -d > /tmp/osc-wrap.py
 python3 /tmp/osc-wrap.py sh -c 'printf hello; cat /tmp/pi-seq.bin; echo CASE-INNER-MARKER'
+echo CASE-RAN-MARKER
+EOS
+
+  cat >"$WORK/case-pi-kitty.sh" <<EOS
+# Pi's graphics sequences handed to tmux as ordinary pane output: tmux parses the graphics protocol itself,
+# so no passthrough wrapper is involved and none is needed. Whether the browser sees a picture is the question
+# this case exists to answer.
+echo '$KITTY_B64' | base64 -d > /tmp/pi-kitty.bin
+cat /tmp/pi-kitty.bin
+echo CASE-RAN-MARKER
+EOS
+
+  cat >"$WORK/case-pi-kitty-wrap.sh" <<EOS
+# The same sequences pushed through tmux's passthrough DCS instead, which delivers them raw to the outer
+# terminal and skips tmux's own graphics parsing. If this one paints nothing while the case above paints
+# something, the mechanism that works is tmux compositing the image, and the shim is the wrong tool here.
+echo '$KITTY_MUX_B64' | base64 -d > /tmp/pi-kitty-wrap.bin
+cat /tmp/pi-kitty-wrap.bin
+echo CASE-RAN-MARKER
+EOS
+
+  cat >"$WORK/case-pi-tui-replay.sh" <<EOS
+# The whole captured screen of the real Pi session, redrawn into the pane in one shot. This is the closest
+# this harness comes to watching Pi itself run: the transmission, the re-plots and the terminal's own cursor
+# movement, with nothing added or removed.
+echo '$TUI_CAPTURE_B64' | base64 -d > /tmp/pi-tui.bin
+cat /tmp/pi-tui.bin
 echo CASE-RAN-MARKER
 EOS
 
@@ -235,15 +269,15 @@ run_case() {
       -p 7681 -b /pane -w /workspace -W -t enableSixel=true \
       bash -c 'until [ -f /tmp/go ]; do sleep 0.3; done; sleep 8; sh /tmp/case.sh; sleep 40' >/dev/null
   else
-    # ttyd does not start the pane command until a client attaches, which is the ordering primitive this
-    # whole file was missing: attaching the browser is what starts the clock, so a short sleep after that is
-    # enough for tmux to attach and finish asking the outer terminal what it supports. The session is created
-    # detached and then attached because `new-session -A` silently ignores the command when a session of that
-    # name already exists, and ttyd re-runs this command whenever a client reconnects.
+    # tmux's server is created by the container's own command rather than by the shell ttyd spawns for a
+    # client. When the session is created inside ttyd's pane shell, tmux still reports the session and the pane
+    # still runs, but capture-pane returns a blank screen and nothing reaches the browser: the measurement
+    # collapses silently, which is the worst kind of failure for a harness. Creating the session first and
+    # attaching to it keeps the pane under a pty tmux can see, and the ordering primitive survives because the
+    # case script itself waits for /tmp/go, which only appears once the browser is already reading.
     docker run -d --name "$container" --label managed-by=slopyphus-testbed \
-      -p "0.0.0.0:$port:7681" --entrypoint /usr/bin/ttyd "$IMAGE" \
-      -p 7681 -b /pane -w /workspace -W -t enableSixel=true \
-      bash -c 'until [ -f /tmp/go ]; do sleep 0.3; done; tmux new-session -d -s pane "sleep 4; sh /tmp/case.sh; sleep 45"; exec tmux attach -t pane' >/dev/null
+      -p "0.0.0.0:$port:7681" --entrypoint /bin/sh "$IMAGE" -c \
+      'tmux new-session -d -s pane "until [ -f /tmp/go ]; do sleep 0.3; done; sh /tmp/case.sh; touch /tmp/case-done.txt; sleep 45"; exec /usr/bin/ttyd -p 7681 -b /pane -w /workspace -W -t enableSixel=true bash -c "exec tmux attach -t pane"' >/dev/null
   fi
   sleep 1
 
@@ -279,6 +313,11 @@ run_case() {
       ran=capture
     elif [ "${painted:-0}" -ge 100 ]; then
       ran=pixels
+    elif docker exec "$container" test -f /tmp/case-done.txt 2>/dev/null; then
+      # The pane ran the case to completion. That is a liveness proof, not a proof the pane's text survived
+      # tmux: capture-pane answers blank here even in runs where the browser screenshot clearly shows the
+      # marker above the image, which is why this check sits below the pixels rather than above them.
+      ran=done
     else
       ran=no
     fi

@@ -435,6 +435,82 @@ plain terminal client never gets it, which does not match what ttyd's client dem
 tmux's rescaling is good enough to look at. Reopening this needs something new, not re-derivation:
 a Pi-side change that emits the wrapper itself accepted as a component, or a tmux that re-emits graphics it parsed.
 
+### Reopened, measured against a running Pi rather than against its bundle
+
+The sentence above says reopening needs a Pi-side change. What it actually needs is two flags and a relay, and
+that is now measured end to end.
+
+**Pi turns its own images off in fullscreen.** `beforeTerminalStart` in the shipped bundle reads
+`capabilities.images === "iterm2"` and calls `setCapabilities({ ...capabilities, images: null })`. Measured in a
+bare pty, with no tmux anywhere in the path: a Pi session asked to read a PNG emits **0 × OSC 1337**. The bytes
+are never written, so nothing downstream has anything to discard. This is the reason four rounds of transport
+measurement kept coming back empty.
+
+**Fullscreen Pi does draw images, in a protocol nothing in this stack can display.** With
+`PI_IMAGE_PROTOCOL=kitty` the same session emits 11 graphics sequences: one transmit-and-display carrying a
+160×80 PNG (`a=T,f=100,q=2,C=1,c=60,i=3646177082,y=10,h=70,r=13`), three re-plots of that image id at different
+scroll positions (`a=p,q=2,C=1,c=60,i=…,y=21,h=59,r=11`), and the bookkeeping deletes (`a=d,d=a`, `a=d,d=A`).
+Captured verbatim in `hack/fixtures/pi-kitty-pi-tui.bin`, and the whole screen in
+`hack/fixtures/pi-tui-kitty-capture.bin`. Painted pixels of that fixture in the browser harness: **0 bare, 0
+through tmux, 0 through tmux's passthrough wrapper**, each with the case confirmed to have run (`pane-ran=done`,
+and the `pi-iterm` control in the same run painted 155750 bare / 0 through tmux exactly as every earlier run).
+So xterm.js has no kitty handler, and tmux does not composite kitty graphics into sixel either — my own probe of
+that question could not decide it because tmux reported `#{client_termfeatures}` without `Sxl` and an empty
+`#{client_cell_pixels}`, which are the two gates sixel needs, and `#{sixel_support}=1`.
+
+**Pi has no sixel encoder, confirmed a second way.** `sixel` appears nowhere under
+`@earendil-works/pi-coding-agent` (nor in `pi-tui`, `pi-agent-core`, `pi-ai`, `pi-codemode`, `pi-mcp`), and the
+protocol values Pi accepts are `kitty | iterm2 | none`.
+
+**Regular mode keeps the iTerm2 path alive.** `--tui-mode regular` is not an alt-screen UI — 0 × `ESC[?1049h`
+measured against 1 for `--tui-mode fullscreen` — so the nulling never runs. The protocol still has to be named,
+because Pi asks the terminal whether it supports images and a terminal behind tmux does not answer in the form Pi
+expects; with `PI_IMAGE_PROTOCOL=iterm2` set, a regular-mode Pi reading a PNG emits **1 × OSC 1337**.
+
+**The relay wraps a running Pi, and what lands in the pane is tmux's own wrapper.** A Pi session under
+`tools/tmux-osc-wrap.py` inside a tmux pane wrote, recorded by `pipe-pane` off the pane itself:
+
+```
+ESC P tmux ; ESC ESC ESC ]1337;File=inline=1;size=342;width=60;height=auto:iVBORw0KGg…
+```
+
+with no unwrapped OSC 1337 anywhere in that stream. That is the last link the previous paragraphs said was
+missing: the program that produces the sequences is Pi, and the wrapper is applied while it runs rather than to a
+file of bytes somebody wrapped beforehand.
+
+**Rendered size, same 560×280 test image:** 153965 px live relay through tmux · 155225 px for the same bytes
+pre-wrapped through tmux · 155750 px in a pane with no tmux. The screenshots show the same flag in all three,
+with `CASE-INNER-MARKER` and `CASE-RAN-MARKER` legible around it, which is the marker evidence that a wrapper
+closed where it should.
+
+What ships as a result: `tools/tmux-osc-wrap.py` and `tools/pi-images.sh`, installed in the agent image as
+`/usr/local/share/slopyphus/tmux-osc-wrap.py` and `/usr/local/bin/pi-images`. The default pane command is
+untouched — inline images are opt-in by running `pi-images` where one would run `pi`, and what that gives up is
+Pi's fullscreen UI rather than anything about the terminal. Which fullscreen features are lost that way is Pi's
+behaviour and has not been measured here; `--tui-mode` precedence is: a mode given later wins, because
+`--tui-mode regular --tui-mode fullscreen` enters the alternate screen (1) exactly as fullscreen alone does.
+
+Two things remain open, kept as open measurements rather than folded into the conclusion:
+
+- **tmux's sixel rescaling is not pinned.** Re-running the same `img2sixel` case today gave 12275 px bare and
+  2590 px through tmux, where the earlier run of the same case gave 356151 and 72930. The screenshot shows a
+  ~62×41 flag in the pane, so the image is real and tiny. The harness shape changed between those runs (tmux's
+  session is now created by the container's own command rather than by the shell ttyd spawns for a client), which
+  plausibly changes whether tmux has a cell-pixel measurement to scale against — but the *bare* variant's shape
+  did not change and its number dropped too, so part of that drop is unexplained and the size claim is not safe
+  to quote until it is re-measured.
+- **`capture-pane` answering blank is a measurement bug, not a result.** Panes driven from ttyd's client shell
+  reported no session content while the browser screenshot of the same container plainly showed
+  `CASE-RAN-MARKER` above a full-size image. The tmux variant now creates the session before ttyd starts and the
+  case script waits for `/tmp/go`, and the liveness check falls back to a marker file the pane writes after the
+  case finishes. That fallback proves the case ran; it does not prove tmux carried the pane's text, which is why
+  it sits below the pixel check rather than above it.
+
+The tmux man-page report is still unfiled for the same reason as before: no `gh`, no credentials, and filing under
+someone else's name needs a route handed to this pod. The Pi-side ask is now concrete enough to file too, in one
+sentence: Pi emits images in a protocol the terminal cannot show and switches the one protocol its own renderer
+can show off in fullscreen; either emit sixel when `$TMUX` is set, or emit tmux's own passthrough wrapper.
+
 
 ## Validation recipe
 
@@ -453,6 +529,10 @@ hack/pane-persistence.sh <test image tag>   # does a pane outlive the last viewe
 hack/tmux-manpage-dcs-close.sh             # tmux's passthrough terminator, measured on plain tmux alone
 hack/sixel-show.sh                         # show a PNG as sixel in this pane + what tmux will do with it
 hack/sixel-late-client.sh                  # does tmux re-emit a pane's sixel, and is sixel compiled in
+hack/wrap-tmux-dcs.py <file>               # a file's output wrapped in tmux's passthrough DCS
+hack/pi-image-bytes.mjs <png> --protocol   # what Pi would put on the wire, read out of Pi's bundle
+tools/tmux-osc-wrap.py <cmd>               # wrap a running program's OSC 1337 images as they go
+tools/pi-images.sh                         # run Pi so inline images survive tmux: regular mode + named protocol
 hack/front-cdp.mjs --url http://front:38137/ --pane-selector iframe \
   --key Shift+Enter --key Gap --key Enter               # keys through Chrome's input pipeline, not JS
 hack/front-cdp.mjs --url http://front:38137/ --pane-selector iframe \
