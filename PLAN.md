@@ -283,7 +283,7 @@ failure and is not.
 |---|---|---|
 | hand-written OSC 1337 (iTerm2) | 855225 px | 0 px |
 | Pi's own bytes (`hack/pi-image-bytes.mjs`) | 155750 px | 0 px |
-| sixel (`img2sixel`) | 12275 px | 2590 px, wrong size |
+| sixel (`img2sixel`) | 12275 px | 2590 px — it renders, rescaled small by tmux |
 | Pi's bytes inside tmux's passthrough DCS | 155750 px | **155225 px** |
 | sixel inside the same DCS | 12275 px | 11225 px |
 
@@ -295,10 +295,25 @@ What each of those is evidence about:
 - **Pi's header is `File=inline=1;size=<bytes>;width=<columns>;height=auto`**, extracted from the shipped
   bundle by `hack/pi-image-bytes.mjs` rather than guessed. `height=auto` is not a problem: a 160x80 PNG in
   an 80-column pane paints a 560x280 box, which is column widths plus preserved aspect at 3.5x.
-- **tmux 3.6 has no graphics at all.** It parses OSC 1337 as an OSC, finds no handler, and drops it. Sixel is
-  compiled out of this build (`ENABLE_SIXEL` absent; `sixel_support` is not even a valid option name), so it
-  neither renders sixel itself nor knows whether the client can. An unwrapped image sequence cannot survive
-  it, and that is the whole of the "0 px" column.
+- **tmux 3.6a has no notion of the protocols Pi uses, and does have graphics of its own.** It parses OSC 1337 as
+  an OSC, finds no handler, and drops it — `grep -c 1337 input.c` is 0, and `grep -rn -i kitty` over the whole
+  3.6a tree is 0 hits, so neither of the two protocols Pi can emit means anything to tmux. Sixel is different:
+  **the Ubuntu `tmux 3.6a-2ubuntu0.2` already in our image is compiled with `--enable-sixel`.** `tmux display -p
+  '#{sixel_support}'` returns 1 on the shipped binary, and `config.status`/`Makefile` DEFS carry `-DENABLE_SIXEL=1`
+  in a tree built from the 3.6a tag with that flag. My earlier claim to the opposite — that `ENABLE_SIXEL` was
+  absent and `sixel_support` "is not even a valid option name" — is retracted: I probed with `show-options`, and
+  `sixel_support` is a *status-line format variable* (`format.c:3437`), which `show-options` will always reject,
+  compiled-in or not. That is a probe-shaped error, not a subtle one, and it moved a conclusion. The control that
+  makes the shipped binary's `1` mean something: a clean rebuild from the 3.6a tag without the flag reports `0`,
+  with it reports `1`, and `/usr/bin/tmux` carries the strings `SIXEL flag is %d`, `sixelimage` and `SIXEL IMAGE `
+  that only exist under `ENABLE_SIXEL`. A first attempt at that control copied an already-built tree and `make`
+  reused the existing object files, producing a binary compiled *with* sixel out of a configure run that asked
+  for none — `make clean` is not optional in a control like this.
+  So tmux does parse sixel (`image-sixel.c`, `sixel_parse`, `screen_write_sixelimage`), stores it in the pane's
+  grid, and re-emits it to clients it believes are sixel-capable — the gate is the `sixel` terminal feature,
+  which tmux derives from the terminfo capability `Sxl` (`tty-features.c:351`) or from `terminal-features`. The
+  2590 px against 12275 px is tmux rescaling the image into its cell grid, not discarding it: the flag still
+  paints a recognisable flag in the screenshot, at roughly half the linear size.
 - **tmux's passthrough wrapper works, but not the way the man page reads.** `tmux/input.c`'s `dcs_escape`
   state table dispatches the DCS on ESC followed by `\`, and reads ESC ESC as one literal ESC. So the payload's
   escapes are doubled and the closing ST is **single**: `ESC P tmux ; ESC` + doubled(payload) + `ESC \`.
@@ -330,11 +345,20 @@ time ttyd sees the bytes tmux has already thrown them away. A pty relay in front
 1337 would be a new component in front of every agent, and it would have to be right about partial
 sequences arriving across read boundaries. That is not a change to land while the persistence trade is
 unresolved.
-- **Rebuilding tmux with `--enable-sixel` is not being done blind.** It would let tmux parse sixel and
-  re-emit it to sixel-capable clients, and it is probably the right long answer, but Pi does not choose
-  sixel — it chooses iTerm2 whenever the terminal answers XTVERSION, which xterm.js does — so a sixel-capable
-  tmux would not, on its own, make Pi's images appear. That gap needs its own measurement before a build
-  change is worth the layer.
+- **Rebuilding tmux with `--enable-sixel` is superseded, not rejected: there is nothing to rebuild.** Ubuntu's
+  build already has it on. What would be needed instead is a *producer*, and the reason Pi's own images still
+  cannot appear is unchanged: Pi does not choose sixel — it chooses iTerm2 whenever the terminal answers
+  XTVERSION, which xterm.js does — and tmux has no handler for either protocol Pi can emit.
+- **tmux's sixel re-emission is gated on something about the client that I have not identified yet.** Measured
+  with a real 342-byte PNG through `img2sixel`, `pipe-pane` on the pane and `script(1)` on the client, both
+  attach orderings, on both the shipped tmux and one with `terminal-features 'xterm-256color:sixel'` added: the
+  pane hands tmux the sixel every time (`pane_dcs=1`), and a client attaching with plain `TERM=xterm-256color`
+  receives **no sixel at all** (`client_dcs=0`) whether it attached before or after the print, feature option or
+  not. Yet the same case through ttyd visibly paints a flag. So the gate is real, it is about the ttyd/xterm.js
+  client rather than the option, and "does a viewer that arrives late still see the image" is unanswered at the
+  pixel level. An earlier version of this probe built its base64 inside the container, found no PNG, wrote an
+  empty one and reported zeros with complete confidence — the placeholder in the probe is a placeholder for a
+  reason.
 - **`PI_IMAGE_PROTOCOL=none` in the entrypoint** would stop Pi emitting sequences tmux eats, and is the
   opposite of what the task wants. Recorded so the next reader knows it was considered.
 
@@ -399,12 +423,17 @@ option is read rather than opinion:
   pod has no `gh` and no GitHub credentials, and filing an issue against someone else's repository under your
   name is not something to do without being handed a way to do it.
 
-What is agreed to be off the table, and why: no relay component; no tmux rebuilt with sixel (agreed with
-home-ops on their reasoning — the client already paints Pi's bytes in a bare pane, so the renderer is not the
-missing part, tmux's stripping is, and a sixel tmux would fix a problem the browser does not have); no dropping
-of tmux. Reopening this needs something new, not re-derivation: a Pi-side change that emits the wrapper itself
-accepted as a component, a tmux that re-emits graphics it parsed, or a decision that some panes should not run
-under tmux after all.
+What is agreed to be off the table, and why: no relay component; no dropping of tmux. The "no tmux rebuilt with
+sixel" item is **withdrawn as unnecessary rather than as rejected** — the build we already ship has the flag on,
+so there is nothing to rebuild. What is actually missing is a producer: tmux will carry sixel and Pi cannot emit
+sixel (`encodeITerm2` and `encodeKitty` are the only encoders in Pi's shipped bundle, and grepping the installed
+package for `sixel` finds nothing), which leaves "something in the pane prints sixel" as the one route that needs
+no fork of anything — `img2sixel` is already in the agent image, and Task 3 already lands uploaded files on disk.
+Re-opening Task 4 now means measuring two things, not re-deriving the blocker: whether tmux re-emits a stored
+sixel to a viewer that attaches *after* the print (see the sixel re-emission bullet — the byte-level probe says a
+plain terminal client never gets it, which does not match what ttyd's client demonstrably does get), and whether
+tmux's rescaling is good enough to look at. Reopening this needs something new, not re-derivation:
+a Pi-side change that emits the wrapper itself accepted as a component, or a tmux that re-emits graphics it parsed.
 
 
 ## Validation recipe
