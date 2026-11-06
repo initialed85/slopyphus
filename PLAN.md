@@ -154,6 +154,38 @@ like a dead terminal with nothing in the desktop saying what was wrong. `docker-
 re-emits both headers in the site branch. Terminal panes reached by *service name* (every production pane)
 were unaffected; one reached by URL was not.
 
+Second trap, found by asking why the Shift+Enter fix looked like it had not deployed: ttyd serves the document
+that *carries* the terminal bundle - the bundle is inlined into it and the file is compiled into the binary -
+with `content-type` and `content-length` and nothing else. No `Cache-Control`, no `ETag`, no `Last-Modified`,
+no conditional path, because an embedded resource has no file to date. A tab opened before a rollout therefore
+keeps running the bundle it cached, which from inside the pane is indistinguishable from a fix that never
+shipped. The fork now answers `Cache-Control: no-store` on that document (measured on the built image, on the
+plain branch and on the gzip branch browsers actually request; nginx passes it through unchanged, so panes
+reached through the desktop get it as well):
+
+```
+HTTP/1.1 200 OK
+server: ttyd/1.7.7-slopyphus (libwebsockets/4.3.5-unknown)
+content-type: text/html
+cache-control: no-store
+content-length: 731516          # 191946 on the wire when the client accepts gzip
+```
+
+`no-store` rather than `no-cache` because there is nothing to revalidate *against* - a validator-less
+`no-cache` means "ask again", and asking again is what already happened. `no-store` also keeps the response out
+of Chrome's back/forward cache, which is the other way an old terminal survives a reload. `.woodpecker/ci.yaml`
+asserts it against the shipped image (start ttyd inside the agent image, fetch its own index over loopback,
+grep the response headers) rather than by grepping the fork's C, because the header is the thing a
+libwebsockets upgrade could plausibly lose; the assertion was run locally both ways first - the real pattern
+passes, and a pattern that is absent from the response fails - because a gate that cannot fail is scenery.
+
+Deliberate gap, written down rather than papered over: the `--index` branch of ttyd's document serving is
+untouched. In the libwebsockets this build links against, `lws_serve_http_file` takes one raw
+`const char *other_headers, int other_headers_len` blob whose accepted shape is not documented, and guessing a
+header format into a path that serves a page is worse than leaving it alone. No ttyd in this deployment uses
+`--index` (docker-entrypoint.sh serves the embedded document), so if a custom index is ever introduced its
+cache headers have to be settled against the libwebsockets version pinned in the Dockerfile.
+
 ## Task 3 — clipboard paste / drag of images into a Pi pane
 
 Status: **not started**
