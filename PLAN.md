@@ -16,7 +16,8 @@ Client changes are invisible until `hack/build-ttyd-client.sh` regenerates
 
 ## Task 1 — copy from tmux into the browser clipboard
 
-Status: **implemented, deployed on the fork, waiting for user validation**
+Status: **complete** — implemented, deployed, and confirmed in the user's browser at the dev front desktop
+(select in a pane, release the mouse, paste into an application outside the browser: the text arrives).
 
 Commit: `initialed85/ttyd` @ `779f6ee` (client + regenerated `src/html.h`).
 
@@ -42,10 +43,14 @@ What was measured, in order:
    in headless Chromium and `navigator.clipboard` does not exist over plain http (`secureContext:
    false`), so this proves the handler fires and decodes correctly, not the final write.
 
-Residual, to be settled by the user's own browser: through the front (https, secure context) the write
-goes through `navigator.clipboard.writeText`, which the http testbed cannot exercise. Two attempts to
-make ttyd serve TLS in a testbed failed (`-C`/`-K` accepted, `libssl` linked, but the port answers plain
-HTTP), so that half is left to live validation rather than faked.
+Residual, settled live on 2026-11-06 by the user's own browser at
+https://slopyphus.dev.initialed85.cc/slopyphus/: through the front (https, secure context) the write goes
+through `navigator.clipboard.writeText`, which the http testbed cannot exercise. Two attempts to make ttyd
+serve TLS in a testbed failed (`-C`/`-K` accepted, `libssl` linked, but the port answers plain HTTP), so that
+half was left to live validation rather than faked - and live validation is what closed it. The chain that
+had to work end to end, with only its last link unverifiable headlessly: tmux `set-clipboard on` emitting OSC
+52 on mouse release in `copy-mode`, ttyd's registered OSC 52 handler decoding it, and the browser accepting
+the write into its own clipboard.
 
 Findings:
 - `xterm.js` 5.4.0 has no OSC 52 handler (`rg osc\( src` is empty; OSC 0/1/2/4/8/10/11/12/104..112
