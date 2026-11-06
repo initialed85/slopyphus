@@ -262,20 +262,96 @@ Open ends:
 
 ## Task 4 — show images inline (Sixel / iTerm inline images)
 
-Status: **not started**
+Status: **measured to a decision. Nothing shipped in the pane path, and the decision is not to ship a guess.**
 
-Findings:
-- ttyd already loads `@xterm/addon-image` when `enableSixel=true` (the entrypoint sets it), and the
-  addon implements both Sixel and the iTerm inline protocol (`IIPHandler.ts`).
-- Pi emits inline images with `terminal.images: "kitty"|"iterm2"|false|"auto"` /
-  `PI_IMAGE_PROTOCOL=kitty|iterm2|none|auto` (docs/settings.md:106, docs/terminal-setup.md:216),
-  `terminal.imageWidthCells` default 60.
-- tmux blocks graphics sequences unless passed through: `.tmux.conf` already has
-  `allow-passthrough on` (added for `notify-send`) — needs a real test.
+The claim this task existed to test is the obvious one: "ttyd loads `@xterm/addon-image`, therefore images
+work". That is true of the far end of the chain and useless as a conclusion, because a pane's bytes are
+produced by the program in the pane, then interpreted by tmux, then re-emitted into ttyd's pty, then handed
+to xterm.js. Whatever tmux parses and dislikes never reaches the addon.
 
-Steps:
-1. Prove xterm renders a directly-printed OSC 1337 image and a `img2sixel` image through tmux.
-2. Set `PI_IMAGE_PROTOCOL=iterm2` in the entrypoint and confirm Pi's own image rendering.
+Two probes now measure this instead of reasoning about it. `hack/image-cases.sh` puts a browser on a real
+pane over CDP and counts pixels on a 2D canvas — ttyd's text renderer is WebGL, and `getContext('2d')` on a
+WebGL canvas is null, so a 2D canvas carrying pixels can only be the image layer — and it screenshots every
+case, because "painted" is not the same claim as "a person saw the flag". `hack/pane-byte-cases.sh` records
+the bytes a pane emits at ttyd's own websocket, which is the exact stream xterm.js is handed. Every case
+holds its print back until a client is attached: an image lives in xterm's image layer, not the text buffer,
+so a client that attaches after the print sees a prompt and no image, which looks exactly like protocol
+failure and is not.
+
+| case | bare pane | tmux pane (what production runs) |
+|---|---|---|
+| hand-written OSC 1337 (iTerm2) | 855225 px | 0 px |
+| Pi's own bytes (`hack/pi-image-bytes.mjs`) | 155750 px | 0 px |
+| sixel (`img2sixel`) | 12275 px | 2590 px, wrong size |
+| Pi's bytes inside tmux's passthrough DCS | 155750 px | **155225 px** |
+| sixel inside the same DCS | 12275 px | 11225 px |
+
+What each of those is evidence about:
+
+- **xterm.js refuses an iTerm2 header with no `size=`.** The first version of the probe omitted it and every
+  iTerm case came back blank, which was `IIPHandler` aborting the sequence, not the transport failing. A
+  sequence that is present in the byte stream and paints nothing has usually been refused at the far end.
+- **Pi's header is `File=inline=1;size=<bytes>;width=<columns>;height=auto`**, extracted from the shipped
+  bundle by `hack/pi-image-bytes.mjs` rather than guessed. `height=auto` is not a problem: a 160x80 PNG in
+  an 80-column pane paints a 560x280 box, which is column widths plus preserved aspect at 3.5x.
+- **tmux 3.6 has no graphics at all.** It parses OSC 1337 as an OSC, finds no handler, and drops it. Sixel is
+  compiled out of this build (`ENABLE_SIXEL` absent; `sixel_support` is not even a valid option name), so it
+  neither renders sixel itself nor knows whether the client can. An unwrapped image sequence cannot survive
+  it, and that is the whole of the "0 px" column.
+- **tmux's passthrough wrapper works, but not the way the man page reads.** `tmux/input.c`'s `dcs_escape`
+  state table dispatches the DCS on ESC followed by `\`, and reads ESC ESC as one literal ESC. So the payload's
+  escapes are doubled and the closing ST is **single**: `ESC P tmux ; ESC` + doubled(payload) + `ESC \`.
+  Doubling the closing ST — which is what the man page's literal appears to show — leaves the wrapper open:
+  tmux swallows the payload *and everything the pane prints afterwards*, which the probes see directly as the
+  case's own `echo` never arriving. `hack/image-sequence-cases.mjs` writes both spellings as cases so the
+  wrong one stays demonstrably wrong.
+- A wrapped image does not damage the text around it. Wrapped sixel paints 11225 px against 12275 px bare,
+  which is tmux re-emitting rather than losing, and echoes printed after a wrapped image arrive normally.
+
+Then the question that decides whether any of this can be shipped: **does the pane need tmux at all?**
+`hack/pane-persistence.sh` puts a command in a pane that appends a tick line per second, attaches a client,
+detaches it, and counts.
+
+- A **bare** pane ticked 1..9 while attached, ticked **nothing** during the six seconds with no client, and a
+  client attaching later saw the counter start again at 1. ttyd starts a pane command only when a client
+  attaches and kills it (SIGHUP) when the last one leaves. A bare pane is a per-viewer process.
+- The **tmux** pane ticked six more lines while nobody was attached, and the later client received 56 tick
+  lines of it out of tmux's scrollback: same process, still running.
+
+So the shape of the task is a genuine trade rather than a missing flag: tmux is what keeps Pi alive when a
+tab closes, and tmux is what deletes inline images. Bare panes render exactly what Pi prints and lose the
+session on disconnect. There is no configuration that makes both true at once.
+
+What is *not* being done, and why:
+
+- **Nothing in this repo can apply the wrapper.** It has to be applied by whatever prints, because by the
+time ttyd sees the bytes tmux has already thrown them away. A pty relay in front of Pi that reframes OSC
+1337 would be a new component in front of every agent, and it would have to be right about partial
+sequences arriving across read boundaries. That is not a change to land while the persistence trade is
+unresolved.
+- **Rebuilding tmux with `--enable-sixel` is not being done blind.** It would let tmux parse sixel and
+  re-emit it to sixel-capable clients, and it is probably the right long answer, but Pi does not choose
+  sixel — it chooses iTerm2 whenever the terminal answers XTVERSION, which xterm.js does — so a sixel-capable
+  tmux would not, on its own, make Pi's images appear. That gap needs its own measurement before a build
+  change is worth the layer.
+- **`PI_IMAGE_PROTOCOL=none` in the entrypoint** would stop Pi emitting sequences tmux eats, and is the
+  opposite of what the task wants. Recorded so the next reader knows it was considered.
+
+One more thing read from the bundle and *not* yet measured in a pane: Pi's alt-screen UI disables iTerm2
+images on entry — `capabilities.images === "iterm2"` causes `setCapabilities({ ...capabilities, images: null })`
+in `TuiAltScreen.beforeTerminalStart()`. If inline images ever look inconsistent inside Pi, that line is
+where to look, and it is a Pi behaviour rather than a slopyphus one.
+
+What would close this task, in the order that makes sense:
+
+1. Decide, in home-ops (which owns the agent Deployments and the front-page config), whether image-bearing
+   agent panes should drop tmux. The cost is measured above: the pane dies with the last viewer.
+2. If tmux stays, decide whether a reframing relay in front of Pi is worth being a component. The bytes it
+   must emit are known and in `hack/pi-image-bytes.mjs --wrap-tmux`; the risk is stream framing, not the
+   protocol.
+3. Separately, measure whether a tmux built with sixel support plus a Pi configured to use sixel renders in a
+   tmux pane. If it does, the relay disappears and the answer is a build flag plus a Pi setting.
+
 
 ## Validation recipe
 
@@ -287,6 +363,10 @@ hack/probe-fork-terminal.js             # forked client really serves and runs a
 hack/upload-gate.sh <test image tag>    # file uploads, asserted against a real pane's own bytes
 hack/ttyd-ws-probe.mjs --url ws://… \
   --send $'b\r' --send $'b\n' --expect '/path/to/upload'   # what a pane receives, and what it is typed
+hack/image-cases.sh <test image tag>    # does an image paint in a pane, bare and under tmux, per case
+hack/pane-byte-cases.sh <test image tag> wrap-st-close-single  # what tmux forwards, byte for byte
+hack/pi-image-bytes.mjs <png> --wrap-tmux | base64 -w0   # the wrapper spelling tmux accepts
+hack/pane-persistence.sh <test image tag>   # does a pane outlive the last viewer, bare and under tmux
 hack/front-cdp.mjs --url http://front:38137/ --pane-selector iframe \
   --key Shift+Enter --key Gap --key Enter               # keys through Chrome's input pipeline, not JS
 hack/front-cdp.mjs --url http://front:38137/ --pane-selector iframe \

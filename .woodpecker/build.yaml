@@ -20,9 +20,21 @@
 #
 # Pushing does not mean uploading: a rebuild whose layers are unchanged produces a new tag pointing at the
 # same digests, and `docker push` uploads nothing for layers the registry already has. The cost of a
-# docs-only merge is therefore a tag, a 3GB image on the node, and a rollout - not another 770MB upload.
-# That rollout is worth knowing about: stamping a new sha into the kustomization moves both Deployments
-# even when nothing in the images changed.
+# docs-only merge is therefore not another 770MB upload, it is the rollout: stamping a new sha into the
+# kustomization moves both Deployments and restarts every agent pod, which kills every Pi session running
+# in them, for a change to a markdown file.
+#
+# So the publish carries a path filter and the gate does not. ci.yaml should still check a docs commit, because
+# checking is cheap and a gate that can be skipped is not a gate. This file is the one that moves pods, and a
+# commit that cannot change either image publishes nothing, leaves the kustomization on the last image that
+# meant something, and rolls nothing.
+#
+# The semantics being relied on: with `exclude` alone, a pipeline runs unless every changed file matches an
+# excluded pattern. The list is derived from the build context rather than from what a file is called: the two
+# Dockerfiles copy vendor/ttyd, .tmux.conf, docker-entrypoint*.sh, the ttyd binary out of the builder stage,
+# the four Pi extension .ts files, and nginx.conf.template / index.html.template. Everything under hack/ and
+# .woodpecker/ is tooling that runs against the images from outside them, so a change there cannot move a
+# layer. vendor/**, the entrypoints, the templates, the Pi extensions and the Dockerfiles stay unlisted.
 #
 # Credentials are native Kubernetes Secrets in the `woodpecker` namespace, mapped to env by
 # `backend_options.kubernetes.secrets` (needs `WOODPECKER_BACKEND_K8S_ALLOW_NATIVE_SECRETS=true` on the
@@ -91,3 +103,12 @@ steps:
 when:
   - event: push
     branch: master
+    path:
+      exclude:
+        - "PLAN.md"
+        - "README.md"
+        - "_AGENTS.md"
+        - "docs/**"
+        - ".slopyphus/**"
+        - "hack/**"
+        - ".woodpecker/**"
