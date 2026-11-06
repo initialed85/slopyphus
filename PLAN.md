@@ -193,26 +193,72 @@ cache headers have to be settled against the libwebsockets version pinned in the
 
 ## Task 3 — clipboard paste / drag of images into a Pi pane
 
-Status: **not started**
+Status: **closed** (2026-11-06). Fork `774a312`, re-pinned here as `vendor/ttyd`.
 
-Findings:
-- Drag works today only because trzsz's `uploadFiles()` types the literal command `trz` (or `trz -d`)
-  into the tty (`trzsz.js/src/filter.ts:243`), so it needs a plain shell in the pane; when the pane runs
-  Pi the typed `trz` lands in Pi's editor. `trz` is installed (`/usr/bin/trz`) but that path cannot work
-  with a TUI in the pane.
-- We own the ttyd fork, so a real upload channel is cheaper than imitating trzsz: new websocket
-  commands (`Command` byte) that stream bytes to the server, which writes the file under the pane's
-  working directory and replies with the path; the client then types that path into the pane —
-  matching what Pi does natively on Linux (temp file, path into the chat).
-- Clipboard paste gives the same `DataTransferItemList` shape as drag, so paste and drop can share one
-  upload path.
+What it does: paste (Ctrl+V, or the browser's menu) or drag a file onto a pane, and it is written to
+`<workdir>/.slopyphus/uploads/<timestamp>-<name>` and the path is typed into the pane, followed by a space.
+A screenshot paste is then one step from "describe this image" in Pi, because Pi's file tools can read that
+path.
 
-Steps:
-1. Fork server: accept upload frames, write to `<working dir>/.slopyphus/uploads/<timestamp>-<name>`,
-  bound size and count, reject when the feature is off.
-2. Fork client: `paste` listener (files/images only, otherwise untouched) + drag/drop reuse; after the
-   server confirms, send the path to the pty.
-3. Flag to disable; document the directory and cleanup.
+Why a new channel was needed: a browser clipboard paste gives xterm *text*, and the file it came from exists
+only in the browser. `DataTransfer` carries `File` objects for paste and drop alike, so one upload path serves
+both, and the protocol carries `BEGIN` (name + declared byte count) → `DATA` (base64 frames) → `COMMIT`, with
+`ABORT` and a result frame. Capabilities are advertised on connect — whether an upload is possible here at
+all, the limit, and the directory — which is what lets a readonly pane refuse a *drop* (accepting one and then
+failing is worse than not offering it) and lets the client refuse a 400 MB file before sending a byte of it.
+
+Decisions, and the reasoning that chose them:
+
+- **The pane's own working directory**, not a server-wide temp directory: a pasted image is only useful to
+  whatever is running in that pane, and one agreed location is what makes the path readable by Pi's tools.
+- **The path is typed as though the user typed it**, with a trailing space. A paste is usually the start of a
+  sentence; without the space the user's next keystroke is glued onto the filename. `tmux capture-pane -pt`
+  hides trailing whitespace, which is how this nearly shipped unverified — the space is now asserted by name.
+- **Names are sanitised, not rejected.** `Screenshot 2026-11-06 at 15.30.05.png` becomes
+  `Screenshot-2026-11-06-at-15.30.05.png` because the name is typed into a shell. A name carrying `../` or an
+  absolute path lands as a basename inside the uploads directory; refusing it would be the bug, since a browser
+  can hand over a real absolute path. Measured: nothing created at `/etc/evil.txt`, stored as `evil.txt`, and
+  nothing containing `..` typed into the pane.
+- **trzsz's drag-drop is replaced wherever uploads are allowed.** trzsz binds `drop` on an inner node and types
+  `trz` into the tty, which needs a plain shell — with Pi in the pane that `trz` lands in Pi's editor, and zmodem
+  names nothing. Capturing `paste`/`dragover`/`drop` on the terminal's *parent* element sees the event before
+  either xterm or trzsz and stops it reaching them; a target that is not ours must not be silently outranked, and
+  the honest knob is `-t enableUpload=false`, which hands the drag back to trzsz.
+- **A refusal leaves nothing behind and never names a file that does not exist**: a short transfer unlinks the
+  partial file and clears the saved path.
+
+The bug that mattered, and why the gate changed shape because of it. Multi-file paste failed *in the browser*
+with "more bytes arrived than the client declared" and passed in the paced probe, so for a while it looked like a
+client loop bug. It was not. `lws_b64_decode_string` takes a C string and has no length to be given, and ttyd's
+assembled receive buffer was `xmalloc(len)` with no terminator, so a `DATA` frame that happened to be followed in
+the buffer by the next frame decoded a few bytes of *that*. Once a log line existed, the server named the numbers:
+a **75 byte chunk against a 70 byte declaration**, a **9219 byte chunk against 9216**. It became reproducible only
+by removing the probe's pacing (`--upload-gap 0`) — a browser fires `BEGIN`, `DATA` and `COMMIT` in one tick, and a
+paced probe could never have seen it. Fix: the buffer is one byte longer with a NUL at the end.
+
+Evidence, split by what each half can actually measure:
+
+- Server half — `hack/upload-gate.sh`, 39 assertions, all passing on this build: the accepted upload is
+  byte-identical to the source and its path arrives on the *pane stdin* (`-t` flags set, path typed, a space after
+  it); oversize, readonly and `--disable-upload` each refuse with a reason, write nothing and type nothing;
+  capabilities answer `false` where an upload is impossible, so no drop is offered; a hostile name is sanitised; a
+  truncated transfer unlinks its partial file; six uploads sent back to back on one connection all land
+  byte-identical; stray `DATA`/`COMMIT`/`ABORT` frames create nothing and the terminal survives.
+- Browser half — Chrome's own input pipeline (`hack/front-cdp.mjs --paste-file`, `--drop-file`, evaluated in the
+  front desktop's pane-iframe realm): a 737280 byte paste md5-identical on disk; a drag over the limit refused with
+  its reason logged and no file, while a text paste in the same session still landed; a five-run loop of three-file
+  pastes, 15 files on disk and all 15 paths typed in the pane, space separated.
+
+Open ends:
+
+- Nothing cleans up `.slopyphus/uploads`. There is a per-file limit (`--upload-max-bytes`, capped at 64 MiB) but no
+  total quota and no age limit, so a long-lived pane accumulates screenshots.
+- The front page's own file picker (`browseFiles` → trzsz `rz`) is a separate upload path and was left alone; it
+  names nothing either.
+- A real drag from the OS into a browser cannot be produced headlessly. The gate dispatches `DragEvent`s inside the
+  page and asserts everything after the event: the handler, the transfer, the bytes, the file.
+- Measurement trap found while verifying: `tmux capture-pane` taken just after a pane's last client detached can
+  show a blank screen. Calibrate with a `tmux send-keys` string before believing a blank pane is empty.
 
 ## Task 4 — show images inline (Sixel / iTerm inline images)
 
@@ -238,7 +284,18 @@ hack/front-testbed.sh --build            # ttyd test bed on 127.0.0.1:7654 (loca
 hack/build-ttyd-client.sh               # regenerate vendor/ttyd/src/html.h
 hack/html-h-payload.mjs --verbose       # detect html.h drift before pushing
 hack/probe-fork-terminal.js             # forked client really serves and runs a shell
+hack/upload-gate.sh <test image tag>    # file uploads, asserted against a real pane's own bytes
+hack/ttyd-ws-probe.mjs --url ws://… \
+  --send $'b\r' --send $'b\n' --expect '/path/to/upload'   # what a pane receives, and what it is typed
+hack/front-cdp.mjs --url http://front:38137/ --pane-selector iframe \
+  --key Shift+Enter --key Gap --key Enter               # keys through Chrome's input pipeline, not JS
+hack/front-cdp.mjs --url http://front:38137/ --pane-selector iframe \
+  --paste-file 'f.png::a name.png::image/png' --drop-file f.png   # paste and drop through the same pipeline
 ```
+
+A key or a paste dispatched with `new KeyboardEvent(...)` in the page is not the same event Chrome
+produces, and xterm writes terminal data from `keypress` as well as `keydown`: synthetic probes are
+structurally blind to half of what happens. Real input goes through `hack/front-cdp.mjs`.
 
 Push order: commit in the fork (`vendor/ttyd`, `vendor/xterm.js`) → push fork → re-pin submodule →
 commit main repo → wait for Woodpecker build/ci/lint → wait for pods to roll → user validates from
