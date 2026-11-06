@@ -19,6 +19,14 @@
 //
 //   node hack/front-cdp.mjs --url http://192.168.1.213:38137/ [--expression-file f.js] [--wait-ms 3000]
 //                           [--shot out.png] [--width 1280] [--height 800] [--keep-tab]
+//
+// Two more switches exist for the clipboard work, because both halves of it need them:
+//   --ignore-cert-errors            a ttyd started with -c/-k serves a self-signed certificate, and
+//                                   navigator.clipboard only exists in a secure context, so the https
+//                                   path has to be reachable to be tested at all.
+//   --grant-permissions a,b,c       clipboard reads are permission-gated, and reading back what a copy
+//                                   wrote is the only proof that the copy landed in the browser rather
+//                                   than merely being attempted.
 
 import { readFileSync, writeFileSync } from "node:fs";
 
@@ -114,6 +122,18 @@ const { sessionId } = await send("Target.attachToTarget", { targetId: target.tar
 
 await send("Page.enable", {}, sessionId);
 await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false }, sessionId);
+// Security.* is per target and has to be set before the navigation that would otherwise fail on a
+// self-signed certificate; Browser.grantPermissions is browser level, so it goes without a sessionId.
+if (has("ignore-cert-errors")) {
+  await send("Security.enable", {}, sessionId);
+  await send("Security.setIgnoreCertificateErrors", { ignore: true }, sessionId);
+}
+const grant = arg("grant-permissions", "");
+if (grant) {
+  const permissions = grant.split(",").map((s) => s.trim()).filter(Boolean);
+  const origin = new URL(url).origin;
+  await send("Browser.grantPermissions", { origin, permissions });
+}
 await send("Page.navigate", { url }, sessionId);
 
 // A load event is the honest wait; the timer is the fallback for a page that never finishes loading.
@@ -131,8 +151,7 @@ const loaded = new Promise((resolve) => {
   poll.unref?.();
 });
 
-const outcome = { targetId: target.targetId, tab: target.reused, tabsBefore, tabsAfter: 0, load: null, value: null, error: null };
-outcome.load = await loaded;
+const outcome = { targetId: target.targetId, tab: target.reused, tabsBefore, tabsAfter: 0, load: null, value: null, error: null };outcome.load = await loaded;
 await new Promise((r) => setTimeout(r, waitMs)); // xterm, websockets and lazy layout are not load events
 
 if (expressionFile) {

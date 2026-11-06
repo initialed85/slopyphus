@@ -26,6 +26,11 @@ fi
 bash -lic 'pi update'
 bash -lic 'pi update --extensions'
 
+# Pi writes to the local (X11/xclip) clipboard when it can, which a container has no use for. OSC 52 is
+# what actually reaches a browser: Pi sends the copied text to the terminal, tmux passes it through
+# (allow-passthrough), and ttyd's client writes it into the browser clipboard.
+export PI_CLIPBOARD_OSC52=1
+
 # shellcheck disable=SC2016
 tmux new-session -d -s "${NAME}" -c "/workspace/${NAME}" -- bash -lic "pi -c --name ${NAME} --model ${MODEL?MODEL env var empty or unset} || sleep 10" &
 

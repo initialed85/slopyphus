@@ -65,6 +65,28 @@ steps:
       - docker images --format '{{.Repository}}:{{.Tag}} {{.Size}}' | grep slopyphus || true
       - docker system df
 
+  - name: check-vendored-client
+    image: docker.io/library/node:22-slim
+    commands:
+      # ttyd embeds its whole browser UI as a generated header (`vendor/ttyd/src/html.h`, gzipped bytes as
+      # a C array), and the agent image compiles that header rather than the TypeScript under
+      # vendor/ttyd/html/src. So a client edit that is not rebuilt lands in the fork's source tree, passes
+      # review, and changes nothing a user can see. This is the gate for that mistake: every marker has to
+      # be in the source *and* in the shipped header, which is only true if build-ttyd-client.sh ran.
+      - "test -s vendor/ttyd/src/html.h || (echo 'FAIL: vendor/ttyd/src/html.h is empty'; exit 1)"
+      - "node hack/html-h-payload.mjs vendor/ttyd/src/html.h > /tmp/client-bundle.js"
+      - "test -s /tmp/client-bundle.js"
+      # String literals survive minification, call sites do not, so the markers are messages the client
+      # logs rather than identifiers. 'fallback clipboard copy failed' is the OSC 52 clipboard path.
+      - |
+        for marker in 'fallback clipboard copy failed' 'malformed OSC 52 payload'; do
+          grep -qF "$marker" vendor/ttyd/html/src/components/terminal/xterm/index.ts \
+            || { echo "FAIL: $marker is missing from the client source"; exit 1; }
+          grep -qF "$marker" /tmp/client-bundle.js \
+            || { echo "FAIL: vendor/ttyd/src/html.h is stale: the source has '$marker' and the shipped header does not. Run hack/build-ttyd-client.sh and commit the header in the fork."; exit 1; }
+          echo "client feature ships: $marker"
+        done
+
   - name: render-front-config
     image: docker.io/library/nginx:alpine
     environment:
