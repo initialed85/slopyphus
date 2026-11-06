@@ -262,7 +262,8 @@ Open ends:
 
 ## Task 4 — show images inline (Sixel / iTerm inline images)
 
-Status: **measured to a decision. Nothing shipped in the pane path, and the decision is not to ship a guess.**
+Status: **closed as deferred by the pane's owner (home-ops): tmux stays, images wait.** The measurements stand
+as the reason, and the placement that would have made images work without a trade does not exist.
 
 The claim this task existed to test is the obvious one: "ttyd loads `@xterm/addon-image`, therefore images
 work". That is true of the far end of the chain and useless as a conclusion, because a pane's bytes are
@@ -342,15 +343,58 @@ images on entry — `capabilities.images === "iterm2"` causes `setCapabilities({
 in `TuiAltScreen.beforeTerminalStart()`. If inline images ever look inconsistent inside Pi, that line is
 where to look, and it is a Pi behaviour rather than a slopyphus one.
 
-What would close this task, in the order that makes sense:
+Resolution, and the one thing the framing got wrong (home-ops, owner of `clusters/dev/applications/slopyphus/`,
+2026-11-06):
 
-1. Decide, in home-ops (which owns the agent Deployments and the front-page config), whether image-bearing
-   agent panes should drop tmux. The cost is measured above: the pane dies with the last viewer.
-2. If tmux stays, decide whether a reframing relay in front of Pi is worth being a component. The bytes it
-   must emit are known and in `hack/pi-image-bytes.mjs --wrap-tmux`; the risk is stream framing, not the
-   protocol.
-3. Separately, measure whether a tmux built with sixel support plus a Pi configured to use sixel renders in a
-   tmux pane. If it does, the relay disappears and the answer is a build flag plus a Pi setting.
+> Keep tmux. Inline images wait. A missing picture is a capability gap I can live with, a pane that SIGHUPs
+> its agent when the last viewer closes a tab is an outage.
+
+With a placement rule attached: no relay, no per-agent wrapper, and if a wrapper is ever written it goes "at
+slopyphus's own pane byte pump ... not in front of Pi in every agent", because a per-agent wrapper is a new
+component in twenty agent manifests here and in every repo that hosts a pane. That rule is right as a
+preference and it turns out to be unavailable as an implementation, which is worth recording because it is
+the part neither choice in my framing contained: tmux consumes the image sequence at the pane's pty boundary,
+so by the time slopyphus's own copy of PTY bytes to ttyd runs there is nothing left to wrap. Re-measured on
+the case that matters (`hack/pane-byte-cases.sh slopyphus-terminal-test:local iterm`, which is the *unwrapped*
+case, printed with `allow-passthrough on` already in `.tmux.conf`):
+
+- bare pane: 547 bytes, `OSC 1337;File=inline=1;size=342;width=200;height=100;preserveAspectRatio=0` present,
+  terminated by BEL, followed by the case's own marker text.
+- tmux pane: 1523 bytes arrive at ttyd's websocket and contain **no OSC 1337 header, not doubled, not wrapped,
+  not truncated**. The sequence does not exist in the stream slopyphus would have to rewrite.
+
+So the only writer that could ever apply a wrapper is whatever produces the image. That is why this is not a
+placement decision slopyphus can make on its own, and it is the strongest argument for leaving Task 4 closed.
+
+Two findings from reading tmux 3.6's own source (`input.c`, `tmux.1` from the `3.6` tag) while checking the
+suggestion that `allow-passthrough` might be the cheap fix. It is not, and the reason is a matter of where the
+option is read rather than opinion:
+
+- `allow-passthrough` is read in exactly one place in `input.c`: line 2580, inside `input_dcs_string`, and only
+  for a DCS whose body begins `tmux;`, where it becomes `screen_write_rawstring(sctx, buf + prefixlen, len -
+  prefixlen, allow_passthrough == 2)`. It is a permission to *use the wrapper*, not a mode that forwards
+  sequences tmux does not understand. `tmux.1` describes it the same way: "Allow programs in the pane to bypass
+  tmux using a terminal escape sequence (`\ePtmux;...\e\e\e`)".
+- `grep -c 1337 input.c` is 0. tmux 3.6 has no iTerm handler of any kind; an OSC 1337 goes through the generic
+  OSC state machine and is discarded, and no value of `allow-passthrough` reaches that path. There is also no
+  `allow-control-ops` in this version.
+- The option's values are `on | off | all`, and the documentation makes `on` conditional: "passthrough sequences
+  will be allowed only if the pane is visible", with `all` allowed "even if the pane is invisible". Since a ttyd
+  pane is per-client, any future wrapper has to be paired with `allow-passthrough all` or it will be refused
+  whenever nobody is looking.
+- The man page's own literal is wrong in a way that costs a program its output. It shows the closing as `ESC
+  ESC \`, but `input_state_dcs_escape_table` dispatches on `\` (0x5c) directly to `input_dcs_dispatch` and
+  back to ground, while ESC ESC `\` is read as one stored ESC (0x1b falls in 0x00–0x5b, `input_input`, back to
+  `dcs_handler`) followed by a stored backslash (0x5c falls in 0x40–0x7e, `input_input`, still `dcs_handler`):
+  no dispatch, wrapper open. Doubling the terminator is what the documentation recommends and it is what makes
+  tmux swallow the payload *and everything printed after it*. Worth reporting upstream.
+
+What is agreed to be off the table, and why: no relay component; no tmux rebuilt with sixel (agreed with
+home-ops on their reasoning — the client already paints Pi's bytes in a bare pane, so the renderer is not the
+missing part, tmux's stripping is, and a sixel tmux would fix a problem the browser does not have); no dropping
+of tmux. Reopening this needs something new, not re-derivation: a Pi-side change that emits the wrapper itself
+accepted as a component, a tmux that re-emits graphics it parsed, or a decision that some panes should not run
+under tmux after all.
 
 
 ## Validation recipe
