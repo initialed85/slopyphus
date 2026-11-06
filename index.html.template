@@ -202,10 +202,6 @@
         return true;
       }
 
-      function isShiftEnter(event) {
-        return event.key === "Enter" && event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey;
-      }
-
       function dispatchKeyboard(frame, type, init, relayed = false) {
         try {
           const target = frame.contentDocument.querySelector(".xterm-helper-textarea");
@@ -218,29 +214,19 @@
         }
       }
 
-      function translateShiftEnter(event, sourceFrame) {
-        if (!isShiftEnter(event)) return false;
-        const targetFrame = activeFrame ?? sourceFrame;
-        if (!targetFrame) return false;
-
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        if (event.type === "keydown" && !event.repeat) {
-          // xterm/ttyd can lose Shift+Enter; Pi accepts Ctrl+J as the same newline action.
-          const ctrlJ = {
-            key: "j",
-            code: "KeyJ",
-            keyCode: 74,
-            which: 74,
-            ctrlKey: true,
-            bubbles: true,
-            cancelable: true,
-          };
-          dispatchKeyboard(targetFrame, "keydown", ctrlJ);
-          dispatchKeyboard(targetFrame, "keyup", ctrlJ);
-        }
-        return true;
-      }
+      /*
+       * Shift+Enter is not handled here any more, and the reason is worth keeping.
+       *
+       * xterm.js evaluates Enter without consulting Shift (src/common/input/Keyboard.ts, case 13:
+       * `ev.altKey ? ESC+CR : CR`), so a pane cannot tell Shift+Enter from Enter, and this page used to
+       * intercept the keystroke and inject a synthesised Ctrl+J into the focused pane's textarea instead.
+       * That fixed the panes this page frames and left every pane reached directly - a node port, an
+       * agent's own URL - broken, which is the complaint the fix is measured against.
+       *
+       * The translation now happens inside ttyd's client (vendor/ttyd/html/src/components/terminal/xterm,
+       * the onKey handler), so it applies to a pane however the pane was opened, and this page is not in
+       * the business of rewriting keys it is only relaying.
+       */
 
       function relayKeyboard(event, sourceFrame) {
         if (!broadcasting) return;
@@ -270,7 +256,6 @@
         if (relayedKeyEvents.has(event)) return;
         if (handleBroadcastShortcut(event)) return;
         if (handleShortcut(event, sourceFrame)) return;
-        if (translateShiftEnter(event, sourceFrame)) return;
         relayKeyboard(event, sourceFrame);
       }
 

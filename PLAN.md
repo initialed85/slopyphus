@@ -68,24 +68,71 @@ Steps:
 
 ## Task 2 — Shift+Enter without the front door
 
-Status: **not started**
+Status: **implemented in the fork and measured on all three paths** (direct ttyd path, ttyd through
+tmux, ttyd framed by the front desktop).
 
 Observed: works through the slopyphus front (nginx synthesises a Ctrl+J key event into the iframe),
 broken when a ttyd path is opened directly (`https://slopyphus.../home-ops/`).
 
-Findings:
-- `.tmux.conf` already sets `extended-keys on`; xterm.js 5.4.0 has **no Kitty keyboard protocol**
-  support (`rg kittyKeyboard` empty), so tmux cannot report a modified Enter to Pi. The browser is the
-  only place that can tell Shift+Enter from Enter.
-- Therefore the fix belongs in the ttyd client (`customKeyEventHandler`) with a ttyd flag to disable it.
+Findings (measured, each with the pane's application putting its own pty in raw mode — `stty raw -echo;
+cat > /tmp/k.bin` — because that is the condition a TUI puts itself in, and a cooked pane quietly
+rewrites what you are trying to measure):
 
-Steps:
-1. ttyd client: map Shift+Enter to `sendData('\n')` (Ctrl+J), plus Alt+Enter/Ctrl+Enter variants
-   behind the same switch; expose `ClientOptions` key so `--client-option shiftEnter=...` works and the
-   existing `SET_PREFERENCES` path can toggle it.
-2. `docker-entrypoint.sh`: enable by default for all agent panes; `hack/front-testbed.sh` proves it on
-   a localhost port.
-3. `index.html.template`: delete `translateShiftEnter` once the sub-path case works.
+- xterm.js 5.4.0 evaluates Enter without consulting Shift (`src/common/input/Keyboard.ts`, case 13:
+  `ev.altKey ? ESC + CR : CR`). A pane cannot tell Shift+Enter from Enter, so the browser side is the
+  only place the distinction can be made — and `extended-keys on` in `.tmux.conf` cannot rescue it,
+  because xterm.js has no Kitty keyboard protocol support at all (`Keyboard.ts` has no extended-keys
+  branch, `ITerminalOptions` has no kitty flag; the only keyboard option in ttyd's own client options is
+  `macOptionIsMeta`).
+- tmux 3.6 *parses* a CSI-u Enter and rewrites it to a plain CR: `\x1b[13;2u` (Shift+Enter) and
+  `\x1b[13;5u` (Ctrl+Enter) each arrive on the application's stdin as `\r`, which is Submit — the exact
+  opposite of the key's meaning. A raw LF is forwarded unchanged. An earlier revision of this plan said
+  tmux turned CSI-u into LF; that reading came from a cooked pane, where ICRNL maps CR to LF and the line
+  discipline echoes input. Raw mode is the only version worth trusting.
+- LF is what Ctrl+J types, and `tui.input.newLine` defaults to `shift+enter, ctrl+j`
+  (`pi/docs/settings.md:204`), so LF is the one spelling both paths already accept. The front page already
+  depends on that: its own command textarea uses a literal Ctrl+J for a newline.
+
+Fix shipped:
+
+- `vendor/ttyd/html/src/components/terminal/xterm/index.ts`: an `onKey` handler on
+  `attachCustomKeyEventHandler`. Shift+Enter, with Ctrl/Alt/Meta free and not mid-composition, sends `\n`
+  and returns false so xterm does not also emit the CR it would otherwise produce. Everything else returns
+  true untouched — explicitly including Enter with no modifiers while the socket is closed, because that is
+  how ttyd's "Press ⏎ to Reconnect" works, and swallowing it would turn a dead terminal into one that
+  ignores the key meant to revive it. Preference `enableShiftEnter` (default true in `app.tsx`, parsed in
+  `applyPreferences`), so `-t enableShiftEnter=false` on a ttyd command line, `?enableShiftEnter=false` in
+  a URL, and the front's `SET_PREFERENCES` broadcast all reach it.
+- `index.html.template`: `translateShiftEnter` and `isShiftEnter` deleted, with a note left at the
+  deletion point saying why the page is no longer in the business of rewriting keys it only relays.
+- `.woodpecker/ci.yaml`: the vendored-client assertion now also greps `'Shift+Enter -> newline'`
+  in the source *and* in the decompressed `vendor/ttyd/src/html.h`, so a dependency refresh that drops the
+  handler fails the build instead of shipping a silent regression.
+
+Measured acceptance — bytes on the application's stdin (`od -An -c`), not screenshot-level assertions:
+
+| keystroke | direct ttyd path | ttyd → tmux 3.6 | ttyd framed by the front desktop |
+| --- | --- | --- | --- |
+| Enter | `\r` | `\r` | `\r` |
+| Shift+Enter | `\n` | `\n` | `\n` |
+| Ctrl+J | `\n` | `\n` | `\n` |
+| Alt+Enter | `033 \r` | `033 \r` | not typed |
+| Shift+Enter mid-line | `\n` | `\n` | not typed |
+
+Tools, in increasing amount of browser: `hack/ttyd-ws-probe.mjs` drives ttyd's websocket protocol with no
+browser at all (`0` + UTF-8 for input, `1` + JSON for resize, `--send` per frame), so tmux's own key
+translation can be measured with exact bytes; `hack/probe-keys.js` types through a real Chromium over CDP
+and reports console warnings; `hack/probe-front-keys.js` types into the front desktop's iframe and reports
+page-level errors, which is what catches a torn-out helper in the template before anything about keys is
+worth reading.
+
+Trap found on the way, also fixed: a `name=url` pane in the front renders `proxy_set_header Host …` in its
+own location block, and nginx replaces an inherited directive *set* wholesale the moment a nested block
+states one of its own — so the server-level `Upgrade`/`Connection` pair silently vanished for those panes.
+ttyd logged the websocket handshake as a plain `GET /keys/ws`, never spawned a process, and the pane looked
+like a dead terminal with nothing in the desktop saying what was wrong. `docker-entrypoint.nginx.sh` now
+re-emits both headers in the site branch. Terminal panes reached by *service name* (every production pane)
+were unaffected; one reached by URL was not.
 
 ## Task 3 — clipboard paste / drag of images into a Pi pane
 

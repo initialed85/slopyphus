@@ -77,9 +77,13 @@ steps:
       - "node hack/html-h-payload.mjs vendor/ttyd/src/html.h > /tmp/client-bundle.js"
       - "test -s /tmp/client-bundle.js"
       # String literals survive minification, call sites do not, so the markers are messages the client
-      # logs rather than identifiers. 'fallback clipboard copy failed' is the OSC 52 clipboard path.
+      # logs rather than identifiers - and a marker has to be a single literal, not a phrase a template
+      # expression assembles at runtime, which is why this one stops at the arrow rather than quoting the
+      # whole log line. 'fallback clipboard copy failed' is the OSC 52 clipboard path and
+      # 'Shift+Enter -> newline enabled' is the keystroke mapping; both are things a front page cannot
+      # provide for a pane it only frames, which is the reason ttyd is forked at all.
       - |
-        for marker in 'fallback clipboard copy failed' 'malformed OSC 52 payload'; do
+        for marker in 'fallback clipboard copy failed' 'malformed OSC 52 payload' 'Shift+Enter -> newline'; do
           grep -qF "$marker" vendor/ttyd/html/src/components/terminal/xterm/index.ts \
             || { echo "FAIL: $marker is missing from the client source"; exit 1; }
           grep -qF "$marker" /tmp/client-bundle.js \

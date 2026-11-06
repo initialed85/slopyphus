@@ -264,6 +264,14 @@ render_locations() {
       # gets a request it was never designed for: it wants its own Host header, its own SNI name,
       # and it will usually refuse to be framed.
       printf '    proxy_set_header Host %s;\n' "$_host"
+      # Re-emitted, not inherited. nginx replaces an inherited directive *set* wholesale as soon as a
+      # nested block states one of its own, so the single Host line above silently drops the server-level
+      # Upgrade/Connection pair, and a terminal framed this way stops being one: ttyd sees a plain GET on
+      # its /ws path, logs it as HTTP, and never spawns a process. Measured in the front testbed with
+      # COLUMNS='keys=http://<node>:<port>/keys' against a ttyd whose command wrote every byte it received
+      # to a file - no file appeared, because no process started.
+      printf '    proxy_set_header Upgrade $http_upgrade;\n'
+      printf '    proxy_set_header Connection $connection_upgrade;\n'
       printf '    proxy_hide_header X-Frame-Options;\n'
       printf '    proxy_hide_header Content-Security-Policy;\n'
       case "$_upstream" in
