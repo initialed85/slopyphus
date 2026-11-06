@@ -451,6 +451,7 @@ hack/pane-byte-cases.sh <test image tag> wrap-st-close-single  # what tmux forwa
 hack/pi-image-bytes.mjs <png> --wrap-tmux | base64 -w0   # the wrapper spelling tmux accepts
 hack/pane-persistence.sh <test image tag>   # does a pane outlive the last viewer, bare and under tmux
 hack/tmux-manpage-dcs-close.sh             # tmux's passthrough terminator, measured on plain tmux alone
+hack/sixel-late-client.sh                  # does tmux re-emit a pane's sixel, and is sixel compiled in
 hack/front-cdp.mjs --url http://front:38137/ --pane-selector iframe \
   --key Shift+Enter --key Gap --key Enter               # keys through Chrome's input pipeline, not JS
 hack/front-cdp.mjs --url http://front:38137/ --pane-selector iframe \
