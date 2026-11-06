@@ -65,6 +65,9 @@ SEQ_B64=$(node hack/pi-image-bytes.mjs "$TEST_IMAGE" | base64 -w0)
 SEQ_MUX_B64=$(node hack/pi-image-bytes.mjs "$TEST_IMAGE" --wrap-tmux | base64 -w0)
 SEQ_ST_B64=$(node hack/pi-image-bytes.mjs "$TEST_IMAGE" --st | base64 -w0)
 SEQ_ST_MUX_B64=$(node hack/pi-image-bytes.mjs "$TEST_IMAGE" --st --wrap-tmux | base64 -w0)
+# The live shim rather than a pre-wrapped file: the pi-shim case hands the raw Pi sequence to a program running
+# under hack/tmux-osc-wrap.py, which is the shape production would have if this works.
+SHIM_B64=$(base64 -w0 hack/tmux-osc-wrap.py)
 
 write_case_scripts() {
   # Each script recreates its own input inside the container, so a case is a single file that can be pasted
@@ -103,6 +106,17 @@ EOS
   cat >"$WORK/case-pi-iterm-stmux.sh" <<EOS
 echo '$SEQ_ST_MUX_B64' | base64 -d > /tmp/pi-seq.bin
 cat /tmp/pi-seq.bin
+echo CASE-RAN-MARKER
+EOS
+
+  cat >"$WORK/case-pi-shim.sh" <<EOS
+# hack/tmux-osc-wrap.py relaying a program and wrapping OSC 1337 as it goes. It wraps only when TMUX is set, so
+# the bare variant of this case is the raw Pi sequence through a relay that decided to do nothing, and the tmux
+# variant is the same bytes wrapped. CASE-INNER-MARKER proves the relayed program ran to completion;
+# CASE-RAN-MARKER proves the pane carried on after the image, which is what a wrong wrapper terminator destroys.
+echo '$SEQ_B64' | base64 -d > /tmp/pi-seq.bin
+echo '$SHIM_B64' | base64 -d > /tmp/osc-wrap.py
+python3 /tmp/osc-wrap.py sh -c 'printf hello; cat /tmp/pi-seq.bin; echo CASE-INNER-MARKER'
 echo CASE-RAN-MARKER
 EOS
 
