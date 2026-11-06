@@ -378,16 +378,26 @@ option is read rather than opinion:
 - `grep -c 1337 input.c` is 0. tmux 3.6 has no iTerm handler of any kind; an OSC 1337 goes through the generic
   OSC state machine and is discarded, and no value of `allow-passthrough` reaches that path. There is also no
   `allow-control-ops` in this version.
-- The option's values are `on | off | all`, and the documentation makes `on` conditional: "passthrough sequences
-  will be allowed only if the pane is visible", with `all` allowed "even if the pane is invisible". Since a ttyd
-  pane is per-client, any future wrapper has to be paired with `allow-passthrough all` or it will be refused
-  whenever nobody is looking.
-- The man page's own literal is wrong in a way that costs a program its output. It shows the closing as `ESC
-  ESC \`, but `input_state_dcs_escape_table` dispatches on `\` (0x5c) directly to `input_dcs_dispatch` and
-  back to ground, while ESC ESC `\` is read as one stored ESC (0x1b falls in 0x00–0x5b, `input_input`, back to
-  `dcs_handler`) followed by a stored backslash (0x5c falls in 0x40–0x7e, `input_input`, still `dcs_handler`):
-  no dispatch, wrapper open. Doubling the terminator is what the documentation recommends and it is what makes
-  tmux swallow the payload *and everything printed after it*. Worth reporting upstream.
+- The option's values are `on | off | all`, and `on` is documented as conditional: "passthrough sequences will
+  be allowed only if the pane is visible", with `all` allowed "even if the pane is invisible". Measured, that
+  distinction is worth less than the page implies: with a client attached, `on` and `all` behave identically, and
+  an image printed while nothing was attached is absent from a client that attaches afterwards **under `all` as
+  well** — the text printed before and after it arrives, the raw image bytes do not, because they were never
+  copied into the pane's history. An image is only ever available to whoever is looking at the moment it is
+  printed, whatever the option says.
+- The man page's own literal is wrong in a way that costs a program its output, and this is the part of the task
+  worth taking outside this repository. It shows the closing as `ESC ESC \`, but `input_state_dcs_escape_table`
+  dispatches on `\` (0x5c) directly to `input_dcs_dispatch` and back to ground, while ESC ESC `\` is read as one
+  stored ESC (0x1b falls in 0x00–0x5b, `input_input`, back to `dcs_handler`) followed by a stored backslash
+  (0x5c falls in 0x40–0x7e, `input_input`, still `dcs_handler`): no dispatch, wrapper open. The measured cost is
+  not just a missing image — a marker printed *after* the wrapped sequence reaches the client in every
+  single-close case and reaches it in none of the doubled-close cases, so doing what the page says loses the
+  image and everything printed after it. `hack/tmux-manpage-dcs-close.sh` reproduces this against plain tmux
+  with `pipe-pane` and `script(1)` (no ttyd, no xterm.js, no slopyphus in the path) and prints the table;
+  `hack/upstream-tmux-dcs-terminator-report.md` is the filing-ready write-up, with the parser quoted, the table,
+  a minimal reproducer, and the traps that made a first attempt report only zeros. It has not been filed: this
+  pod has no `gh` and no GitHub credentials, and filing an issue against someone else's repository under your
+  name is not something to do without being handed a way to do it.
 
 What is agreed to be off the table, and why: no relay component; no tmux rebuilt with sixel (agreed with
 home-ops on their reasoning — the client already paints Pi's bytes in a bare pane, so the renderer is not the
@@ -411,6 +421,7 @@ hack/image-cases.sh <test image tag>    # does an image paint in a pane, bare an
 hack/pane-byte-cases.sh <test image tag> wrap-st-close-single  # what tmux forwards, byte for byte
 hack/pi-image-bytes.mjs <png> --wrap-tmux | base64 -w0   # the wrapper spelling tmux accepts
 hack/pane-persistence.sh <test image tag>   # does a pane outlive the last viewer, bare and under tmux
+hack/tmux-manpage-dcs-close.sh             # tmux's passthrough terminator, measured on plain tmux alone
 hack/front-cdp.mjs --url http://front:38137/ --pane-selector iframe \
   --key Shift+Enter --key Gap --key Enter               # keys through Chrome's input pipeline, not JS
 hack/front-cdp.mjs --url http://front:38137/ --pane-selector iframe \
