@@ -28,4 +28,15 @@ WRAP=${WRAP:-/usr/local/share/slopyphus/tmux-osc-wrap.py}
 [ -n "${TMUX:-}" ] || echo "pi-images: not in a tmux pane, so nothing needs wrapping here" >&2
 PI_IMAGE_PROTOCOL=${PI_IMAGE_PROTOCOL:-iterm2}
 export PI_IMAGE_PROTOCOL
+# Anchoring is the default for a pane started here, and it is the reason an image survives a scroll. tmux stores
+# cells and reprints them for every viewer, so a picture that only ever existed as bytes is gone the moment the grid
+# moves - measured on the live front end (07/11) as "it displays and scrolls naturally, but if you scroll it
+# disappears" and, after a split, a picture drawn below the tmux status bar over another pane's prompt. The relay
+# saves the file, reserves the rows and leaves the token that names both; the client draws from the token.
+#
+# OSC_WRAP_ANCHOR=0 restores the old byte stream, which is what a terminal that cannot read a token needs: ssh into
+# a pane and attach the same tmux session in iTerm2, and an anchored picture is a line of text there. OSC_WRAP_INLINE=on
+# sends the bytes *and* the token, which is that case without giving up the anchor.
+OSC_WRAP_ANCHOR=${OSC_WRAP_ANCHOR:-1}
+export OSC_WRAP_ANCHOR
 exec python3 "$WRAP" pi --tui-mode regular "$@"

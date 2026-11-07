@@ -10,11 +10,11 @@
 # The mechanism under test is the pair the rest of this feature is built out of:
 #
 #   tools/tmux-osc-wrap.py --anchor   saves each picture it passes under the pane's working directory, named by
-#                                     a prefix of its content hash, and prints one dimmed line of text on the row
-#                                     below the rows it reserved: [[img:<10 hex>.<ext>:<rows>]]
+#                                     a prefix of its content hash, and prints one dimmed line of text at the
+#                                     top-left cell of the space it reserves: [[img:<10 hex>.<ext>:<rows>]]
 #   ttyd (src/http.c)                 GET <base>/images/<name> serves that file and nothing else
 #   the client addon (html/.../addons/image-anchor.ts) reads those lines out of the buffer and draws the file
-#                                     they name, over the rows above the line, on every render
+#                                     they name, downward from the row the line sits on, on every render
 #
 # Which is why the ordering in this file is the opposite of hack/image-cases.sh. That harness has to hold the
 # print back until the browser is attached, because an image lives only in the frame that drew it. Here the
@@ -38,7 +38,7 @@ set -eu
 
 IMAGE=${1:-slopyphus-terminal-test:local}
 if [ $# -ge 1 ]; then shift; fi
-CASES=${*:-"anchor-emit anchor-text-only anchor-scroll anchor-split"}
+CASES=${*:-"anchor-emit anchor-text-only anchor-scroll anchor-split anchor-narrow"}
 
 DOCKER_HOST=${DOCKER_HOST:-tcp://192.168.1.213:2375}
 export DOCKER_HOST
@@ -58,6 +58,9 @@ mkdir -p "$SHOTS"
 PNG_B64=$(base64 -w0 "$TEST_IMAGE")
 SEQ_B64=$(node hack/pi-image-bytes.mjs "$TEST_IMAGE" | base64 -w0)
 SHIM_B64=$(base64 -w0 tools/tmux-osc-wrap.py)
+# A line long enough to wrap twice at 100 columns and several times again at 40, which is what makes a tmux reflow
+# insert rows rather than merely move them.
+LONG_LINE=$(python3 -c "print('narrowreflowmeasure'*14)")
 # The name the relay would have written, worked out here so the text-only case can name a file that already
 # exists. Same rule as save_image in the relay: sha256 of the picture's bytes, first ten hex digits.
 NAME=$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest()[:10])' "$TEST_IMAGE").png
@@ -109,6 +112,20 @@ python3 /tmp/osc-wrap.py --anchor sh -c 'cat /tmp/pi-seq.bin; echo CASE-AFTER-MA
 echo CASE-RAN-MARKER
 EOS
 
+  # The case the ordering of an anchor was changed for, and the reason the anchor now sits at the picture's top-left
+  # cell rather than under it. tmux reflow inserts rows into the lines that wrap; whether those inserted rows land
+  # in the space an anchor reserved depends on whether that space lies above or below the record of it. A long line
+  # printed above the picture, and the pane narrowed before anyone looks at it, is that question asked in a grid.
+  cat >"$WORK/case-anchor-narrow.sh" <<EOS
+echo "CASE-SIZE \$(tput cols 2>/dev/null || echo ??)x\$(tput lines 2>/dev/null || echo ??)" > /tmp/case-size.txt
+echo CASE-BEFORE-MARKER
+echo '$LONG_LINE'
+echo '$SEQ_B64' | base64 -d > /tmp/pi-seq.bin
+echo '$SHIM_B64' | base64 -d > /tmp/osc-wrap.py
+python3 /tmp/osc-wrap.py --anchor sh -c 'cat /tmp/pi-seq.bin; echo CASE-AFTER-MARKER'
+echo CASE-RAN-MARKER
+EOS
+
   # The gesture a person actually reports. A mouse wheel in a tmux pane is not the browser scrolling its own
   # terminal: tmux answers WheelUpPane with copy-mode, reprinting a slice of the pane's history over the grid, and
   # prints the live pane again when the gesture ends. The filler lines exist so there is a history slice to
@@ -129,11 +146,15 @@ EOS
   cat >"$WORK/case-anchor-text-only.sh" <<EOS
 echo "CASE-SIZE \$(tput cols 2>/dev/null || echo ??)x\$(tput lines 2>/dev/null || echo ??)" > /tmp/case-size.txt
 echo CASE-BEFORE-MARKER
-# The blank rows come from the same claim the anchor makes, so the grid the browser sees has room for the
-# picture the anchor says belongs there. Nothing here reserves anything; the anchor is the only instruction.
-i=0
-while [ \$i -lt ROWSPLACEHOLDER ]; do printf '\r\n'; i=\$((i + 1)); done
+# The blank rows come from the same claim the anchor makes, and they come *after* it, because that is what the
+# relay's anchor actually reserves: the token's own row is the picture's top row, so an anchor claiming N rows owns
+# the row it is printed on plus the N-1 below it. Anything the application prints next belongs below that space,
+# which is why the marker is separated from the anchor by N-1 blank rows and not sitting directly under it - a
+# marker in the picture's own rows is the anchor refusing to draw over text, which is correct behaviour and would
+# otherwise look like a broken case.
 printf '\033[2m[[img:$NAME:ROWSPLACEHOLDER]]\033[0m\r\n'
+i=0
+while [ \$i -lt \$((ROWSPLACEHOLDER - 1)) ]; do printf '\r\n'; i=\$((i + 1)); done
 echo CASE-AFTER-MARKER
 echo CASE-RAN-MARKER
 EOS
@@ -219,11 +240,11 @@ write_dom() {
     }
     scanCost = { passes, rows: term.rows, ms: +(performance.now() - started).toFixed(2) };
   }
-  const above = [];
+  const below = [];
   if (anchors.length) {
-    for (let y = Math.max(0, anchors[0].row - 25); y < anchors[0].row; y++) {
+    for (let y = anchors[0].row + 1; y < Math.min(buffer.length, anchors[0].row + 26); y++) {
       const line = buffer.getLine(y);
-      above.push(line ? line.translateToString(true).trim() : '');
+      below.push(line ? line.translateToString(true).trim() : '');
     }
   }
   // Painted pixels are not the same thing as visible pixels, and the difference is a stacking question rather
@@ -250,7 +271,7 @@ write_dom() {
     scanCost,
     screen: rect ? { w: Math.round(rect.width), h: Math.round(rect.height) } : null,
     anchors,
-    rowsAboveAnchor: above,
+    rowsBelowAnchor: below,
     fetchResult,
     stack,
     paint,
@@ -269,9 +290,20 @@ results=$WORK/results.txt
 # the file with grep, which found nothing in front-cdp.mjs's pretty-printed multi-line output and so reported a
 # feature that was working as one that was broken. Everything comes out on one line so the shell can compare it.
 read_summary() {
-  python3 - "$1" <<'EOS'
+  python3 - "$1" "$2" <<'EOS'
 import json, re, sys
 d = json.load(open(sys.argv[1]))
+# The test picture's own aspect ratio, read out of its IHDR rather than assumed. A picture kept at its ratio in a
+# pane narrower than its width is *shorter* than the rows an anchor reserved - the reservation is a promise about
+# space, not about size - and a harness that insists rows always win reports a correct draw as a failure.
+natural = 0.0
+try:
+    with open(sys.argv[2], "rb") as fh:
+        head = fh.read(24)
+    if head[:8] == b"\x89PNG\r\n\x1a\n":
+        natural = int.from_bytes(head[16:20], "big") / int.from_bytes(head[20:24], "big")
+except Exception:
+    natural = 0.0
 v = d.get("value") or {}
 o = (v.get("overlay") or [{}])[0]
 box = o.get("box") or {}
@@ -285,20 +317,24 @@ if anchors:
     if m:
         claim = int(m.group(1))
 cell_h = (screen.get("h", 0) / grid["rows"]) if grid.get("rows") else 0
-# Where the bottom edge of a picture drawn for this anchor has to land, in the same device pixels the canvas was
-# sampled in: the top of the anchor's own row, counted from the viewport the browser is looking at. The addon
-# counts rows from 0 and its picture ends at anchor_row * cell_height, which is the same edge; an earlier version
-# of this formula added one and reported every working case as one cell short. A picture drawn anywhere else is the "floating in no-man's land"
-# failure - the byte-driven renderer attaching an image to a buffer line of its own after tmux moved the lines.
+# Where the *top* edge of a picture drawn for this anchor has to land, in the same device pixels the canvas was
+# sampled in: the top of the anchor's own row, counted from the viewport the browser is looking at. The relay prints
+# the token at the cursor cell and an inline image renders downward from that cell, so the anchor's row is the
+# picture's first row and its own top edge is the reference edge. The previous reference was the picture's bottom,
+# because the token used to be printed under the space it reserved; a check written against the wrong edge reports
+# every working case as wrong, so both the edge and the formula belong to the geometry and not to taste. A picture
+# drawn anywhere else is the "floating in no-man's land" failure - the byte-driven renderer attaching an image to a
+# buffer line of its own after tmux moved the lines.
 dpr = v.get("dpr") or 1
-box_bottom = (box.get("bottom", -1) + 1) if box else -1
-expect_bottom = ((anchors[0]["row"] - grid.get("viewportY", 0)) * cell_h * dpr) if (anchors and cell_h) else 0
+box_top = box.get("top", -1) if box else -1
+expect_top = ((anchors[0]["row"] - grid.get("viewportY", 0)) * cell_h * dpr) if (anchors and cell_h) else 0
 top = v.get("top") or {}
-print("painted=%s red=%s blue=%s box=%sx%s@%s anchors=%s claim=%s cellH=%.1f claimH=%.1f fetch=%s/%sB top=%s boxBottom=%s expectBottom=%s dpr=%s" % (
+print("painted=%s red=%s blue=%s box=%sx%s@%s anchors=%s claim=%s cellH=%.1f claimH=%.1f claimHdev=%s natural=%.4f fetch=%s/%sB top=%s boxTop=%s expectTop=%s dpr=%s" % (
     o.get("paintedPixels", 0), o.get("red", 0), o.get("blue", 0),
     box.get("w", 0), box.get("h", 0), box.get("top", -1), len(anchors), claim, cell_h, claim * cell_h,
+    round(claim * cell_h * dpr, 1), natural,
     fetch.get("status", "-"), fetch.get("bytes", "-"), top.get("className") or top.get("tag") or "-",
-    box_bottom, round(expect_bottom, 1), dpr))
+    box_top, round(expect_top, 1), dpr))
 for c in d.get("console", []):
     if "anchor" in c.get("text", ""):
         print("console:", c["text"])
@@ -322,15 +358,15 @@ look() {
   shot=$SHOTS/$label.png
   hack/front-testbed.sh cdp --url "http://$NODE:$port/pane/" --wait-ms 12000 \
     --expression-file "$WORK/dom.js" --shot "$shot" --capture-console "$@" >"$json" 2>&1
-  summary=$(read_summary "$json")
+  summary=$(read_summary "$json" "$TEST_IMAGE")
   echo "   $label: $summary"
   painted=$(echo "$summary" | sed -n 's/.*painted=\([0-9]*\).*/\1/p')
   colors=$(echo "$summary" | sed -n 's/.*red=\([0-9]*\).*/\1/p')
   boxh=$(echo "$summary" | sed -n 's/.*box=[0-9]*x\([0-9]*\).*/\1/p')
   claimh=$(echo "$summary" | sed -n 's/.*claimH=\([0-9.]*\).*/\1/p')
   cellh=$(echo "$summary" | sed -n 's/.*cellH=\([0-9.]*\).*/\1/p')
-  boxbottom=$(echo "$summary" | sed -n 's/.*boxBottom=\([-0-9]*\).*/\1/p')
-  expectbottom=$(echo "$summary" | sed -n 's/.*expectBottom=\([0-9.]*\).*/\1/p')
+  boxtop=$(echo "$summary" | sed -n 's/.*boxTop=\([-0-9]*\).*/\1/p')
+  expecttop=$(echo "$summary" | sed -n 's/.*expectTop=\([0-9.]*\).*/\1/p')
   expect_empty=${EXPECT_EMPTY:-0}
   if [ "${painted:-0}" -lt 100 ] || [ "${colors:-0}" -lt 100 ]; then
     if [ "$expect_empty" = 1 ]; then
@@ -358,18 +394,31 @@ look() {
   # cell size it could not know and the browser measured the cell it was actually given; if the picture lands on
   # the rows the anchor says it owns, the two agreed about a number neither of them could have measured alone.
   # Neither size check can say anything about a look that drew nothing at all, which is decided above.
+  boxw=$(echo "$summary" | sed -n 's/.*box=\([0-9]*\)x.*/\1/p')
+  natural=$(echo "$summary" | sed -n 's/.*natural=\([0-9.]*\).*/\1/p')
+  claimdev=$(echo "$summary" | sed -n 's/.*claimHdev=\([0-9.]*\).*/\1/p')
   if [ "${painted:-0}" -ge 100 ] && [ -n "$boxh" ] && [ -n "$claimh" ]; then
-    echo "      drawn height ${boxh}px against the ${claimh}px the anchor's row count implies: $(python3 -c "import sys;print('%s%% apart' % round(abs(float(sys.argv[1]) - float(sys.argv[2])) / float(sys.argv[2]) * 100, 1))" "$boxh" "$claimh")"
-    python3 -c "import sys; sys.exit(0 if abs(float(sys.argv[1]) - float(sys.argv[2])) <= 0.15 * float(sys.argv[2]) else 1)" "$boxh" "$claimh" || {
-      echo "      the picture is not the size the anchor reserved"
-      fails=$((fails + 1))
-    }
+    echo "      drawn height ${boxh}px against the ${claimh}x${natural} picture and the ${claimdev}px its reservation implies"
+    # The two things a draw can actually get wrong about size: its own ratio, and being taller than the space it
+    # was promised. Being *shorter* is legitimate and is reported as a measurement, because a pane 40 columns wide
+    # cannot show a 2:1 picture 20 rows tall and drawing it at 20 rows tall would mean stretching it.
+    if [ "${natural:-0}" != "0" ] && [ "${boxh:-0}" -gt 0 ]; then
+      python3 -c "import sys; sys.exit(0 if abs(float(sys.argv[1]) / float(sys.argv[2]) - float(sys.argv[3])) <= 0.05 * float(sys.argv[3]) else 1)" "$boxw" "$boxh" "$natural" || {
+        echo "      the picture is not the shape the file is"
+        fails=$((fails + 1))
+      }
+    fi
+    python3 -c "import sys; sys.exit(0 if float(sys.argv[1]) <= float(sys.argv[2]) * 1.05 else 1)" "$boxh" "${claimdev:-0}" || {
+        echo "      the picture is taller than the rows its anchor reserved"
+        fails=$((fails + 1))
+      }
+    python3 -c "import sys; short = float(sys.argv[2]) - float(sys.argv[1]); print('      drawn %.1fpx (%s cells) short of its reservation, which a pane narrower than the picture ratio allows does to a picture kept at its ratio' % (max(short, 0), round(max(short, 0) / float(sys.argv[3]), 1)) if short > 1 else '      drawn at the full height its reservation allows')" "$boxh" "${claimdev:-0}" "$cellh"
   fi
   # Where it landed, not merely whether something appeared. A picture the right size drawn over the wrong rows is
   # the failure a report described as floating in no-man's land, and a painted-pixel count cannot see it.
-  if [ "${painted:-0}" -ge 100 ] && [ -n "$boxbottom" ] && [ -n "$expectbottom" ] && [ -n "$cellh" ]; then
-    echo "      drawn bottom edge ${boxbottom}px against the ${expectbottom}px the top of the anchor's own row is: $(python3 -c "import sys;print('%s cells apart' % round((float(sys.argv[1]) - float(sys.argv[2])) / float(sys.argv[3]), 2))" "$boxbottom" "$expectbottom" "$cellh")"
-    python3 -c "import sys; sys.exit(0 if abs(float(sys.argv[1]) - float(sys.argv[2])) <= 1.5 * float(sys.argv[3]) else 1)" "$boxbottom" "$expectbottom" "$cellh" || {
+  if [ "${painted:-0}" -ge 100 ] && [ -n "$boxtop" ] && [ -n "$expecttop" ] && [ -n "$cellh" ]; then
+    echo "      drawn top edge ${boxtop}px against the ${expecttop}px the top of the anchor's own row is: $(python3 -c "import sys;print('%s cells apart' % round((float(sys.argv[1]) - float(sys.argv[2])) / float(sys.argv[3]), 2))" "$boxtop" "$expecttop" "$cellh")"
+    python3 -c "import sys; sys.exit(0 if abs(float(sys.argv[1]) - float(sys.argv[2])) <= 1.5 * float(sys.argv[3]) else 1)" "$boxtop" "$expecttop" "$cellh" || {
       echo "      the picture is not on the rows its anchor owns"
       fails=$((fails + 1))
     }
@@ -386,6 +435,7 @@ run_case() {
   # the relay either way, which is the point - what happens to a picture the grid only *names*.
   case_script="case-$name.sh"
   [ "$name" = anchor-split ] && case_script=case-anchor-emit.sh
+  [ "$name" = anchor-narrow ] && case_script=case-anchor-narrow.sh
 
   start_container "$container" "$port" "$case_script" "$([ "$name" = anchor-text-only ] && echo 1 || echo 0)"
 
@@ -406,7 +456,21 @@ run_case() {
   [ -n "$anchor" ] || { echo "      the relay left no anchor in the grid"; fails=$((fails + 1)); }
   [ -n "$files" ] || { echo "      the relay saved nothing where the server reads"; fails=$((fails + 1)); }
 
-  look "$container" "$port" "$name-attach"
+  if [ "$name" = anchor-narrow ]; then
+    # Narrowed with no client attached, so the window really is 40 columns and the fit addon is not fighting a
+    # request tmux will refuse (window-size is `largest` in this image, deliberately), and no wider viewer exists
+    # yet to reprint the pane at its own size first. The browser then arrives at a width that agrees with it, which
+    # is the resize nobody argued about - a pane that changed shape while nobody was looking at it, and a picture
+    # that has to be drawn from text alone.
+    echo "   (narrowing the pane to 40 columns before any browser attaches, so the long line reflows)"
+    docker exec "$container" tmux resize-window -t pane -x 40 >/dev/null 2>&1 || echo "      resize-window failed"
+    sleep 1
+    docker exec "$container" tmux capture-pane -p > "$WORK/$name.narrow.grid" 2>/dev/null || true
+    echo "      the anchor line is still in the grid $(grep -c '\[\[img:' "$WORK/$name.narrow.grid" 2>/dev/null || echo 0) time(s); the long line is now $(grep -c 'narrowreflowmeasure' "$WORK/$name.narrow.grid" 2>/dev/null || echo 0) piece(s)"
+    look "$container" "$port" "$name-narrow" --width 420 --height 600
+  else
+    look "$container" "$port" "$name-attach"
+  fi
 
   if [ "$name" = anchor-emit ]; then
     # A second tab, at a different viewport: tmux reprints the pane for the new client at the new size, which

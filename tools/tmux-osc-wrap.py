@@ -59,10 +59,18 @@ An image whose format the relay cannot read reserves nothing, which is the behav
 than a wrong guess.
 
 It can also name the pictures it passes. `--anchor` writes each image under the pane's own working directory and
-prints a dim line of text - `[[img:<10 hex>.<ext>:<rows>]]` - on the row below the space it reserved. That line is
-the point: tmux's grid holds cells and stores no copy of an inline image, so every repaint (a wheel scroll, a pane
-resize, a pane menu, a client reattach) erases a picture that was only ever a burst of bytes, while a line of text
-survives all of them. The browser side - ttyd's client addon - turns the line back into the picture.
+prints a dim line of text - `[[img:<10 hex>.<ext>:<rows>]]` - as the first thing on the row the picture starts on,
+which makes the token the picture's own top-left cell. That line is the point: tmux's grid holds cells and stores no
+copy of an inline image, so every repaint (a wheel scroll, a pane resize, a pane menu, a client reattach) erases a
+picture that was only ever a burst of bytes, while a line of text survives all of them. The browser side - ttyd's
+client addon - turns the line back into the picture.
+
+The token goes above the space it reserves rather than below it, because of what tmux reflow does to a resize. A
+narrowing pane rewraps long lines, and rewrapping *inserts rows into the lines that wrap*. Put the empty rows before
+the record and a long line above the picture can wrap into them, so the space the picture was promised is no longer
+there and the picture is refused - which is what a report described as a picture that comes back on a resize "under
+some situations". Put the empty rows after it and the wrapping happens above the whole pair: the token and the rows
+it owns move down together and stay the same shape.
 
 Anchoring replaces the burst rather than adding to it: with `--anchor` the image bytes are not sent to the terminal
 at all, because a picture drawn twice by two renderers with separate ideas of where it is drawn worse than badly.
@@ -207,13 +215,17 @@ class Rewriter:
                 raw, kind = decode_image(payload)
                 name = save_image(raw, kind) if raw else ""
                 if name:
+                    # The anchor first, then the picture it names, then the rows underneath the picture, because
+                    # that order *is* the geometry: the anchor line takes a row of its own and returns the cursor to
+                    # column 0 of it (see anchor_line), and an inline image renders downward from the cursor cell
+                    # without moving it, so the token's cell is the picture's top-left cell.
+                    out += anchor_line(name, n)
                     if self.inline:
                         out += wrapped
                     # Deliberately outside the wrapper. A newline tmux parses is a newline the pane's own grid
                     # keeps, which is what keeps the rows under a picture consistent when the pane redraws;
                     # inside the wrapper they would reach only whoever is looking.
                     out += reserve_newlines(n)
-                    out += anchor_line(name, n)
                     self.stats["images"] += 1
                     self.stats["rows"] += n
                     self.stats["anchors"] += 1
@@ -474,14 +486,20 @@ def anchor_line(name: str, rows: int) -> bytes:
     comes back" behaviour the row reservation alone could not fix.
 
     A line of text is the one thing that survives all of that, so the record is text: dimmed so it reads as a
-    marker rather than as content, on the row immediately below the reserved ones, carrying the saved file's name
-    and the number of rows above it the picture was given. The row count travels with the anchor rather than being
-    recomputed at draw time because the reservation is the anchor's own history - the browser has no way to tell
-    reserved blank rows from blank rows the application printed - and a row count in cells is the one measurement
-    that stays correct when the pane is resized: cells survive a reflow, pixels do not. The name is the same string
-    the server's image route validates, which is what lets a browser ask for the picture without searching.
+    marker rather than as content, printed at the top-left cell of the space it reserves - its own row, column 0 -
+    and carrying the saved file's name and the number of rows below it the picture was given, its own row included.
+    The row count travels with the anchor rather than being recomputed at draw time because the reservation is the
+    anchor's own history - the browser has no way to tell reserved blank rows from blank rows the application
+    printed - and a row count in cells is the one measurement that stays correct when the pane is resized: cells
+    survive a reflow, pixels do not. The name is the same string the server's image route validates, which is what
+    lets a browser ask for the picture without searching.
+
+    The leading CRLF gives the token a row of its own, which matters when a burst arrives mid-line: an application
+    that was halfway through a line keeps its line and the picture starts on the next one. The trailing CR puts the
+    cursor back at column 0 without leaving the row, because an inline image is anchored at the *cursor cell* and
+    the whole point is for that cell to be the token's.
     """
-    return b"\x1b[2m[[img:" + name.encode("ascii") + b":%d]]\x1b[0m\r\n" % rows
+    return b"\r\n\x1b[2m[[img:" + name.encode("ascii") + b":%d]]\x1b[0m\r" % rows
 
 
 def main():
@@ -514,6 +532,7 @@ def main():
             "no reason to understand. After an image it prints blank rows for the rows the picture covers,\n"
             "because xterm.js does not move the cursor for an inline image; --no-reserve turns that off.\n"
             "--anchor saves each picture under the pane's working directory and prints the text line that records\n"
+            "where the picture begins, as its top-left cell, and does not send the picture as bytes; --inline sends\n"
             "where it belongs, and stops sending the image bytes, because the line is what survives a tmux repaint\n"
             "and a picture drawn from both is drawn by whoever guessed the position last. --inline sends the bytes\n"
             "as well, for a terminal that cannot read an anchor; --no-anchor restores the plain byte stream.\n"

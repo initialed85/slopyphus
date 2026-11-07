@@ -728,11 +728,10 @@ a sentence is only a missing picture.
       pretending it was a 404.
 - [x] client addon: anchor scan, image store, redraw on render/resize/scroll (ttyd 0f299b7, `src/html.h` rebuilt
       by `hack/build-ttyd-client.sh`, pinned by slopyphus below)
-- [ ] turn the anchor on in the entrypoint (`OSC_WRAP_ANCHOR=1` in the pane's environment), now that the client
-      understands it, so users never see a token with no picture. Held only on a stated word from Ed about the pod
-      roll: the push rebuilds the image, the agent pods roll, and every live Pi session in them dies mid-sentence.
-      home-ops confirmed nothing on the cluster blocks it (Argo apps Synced/Healthy, Longhorn 8/8 at 2 replicas, the
-      cordoned nodes run no slopyphus) and said, correctly, that the constraint is Ed's to release and not theirs.
+- [x] turn the anchor on for the panes this image starts: `tools/pi-images.sh` defaults `OSC_WRAP_ANCHOR=1` (07/11,
+      measured above). It is not a cluster change and it is reversible per pane with `OSC_WRAP_ANCHOR=0`.
+- [ ] say what anchoring costs a terminal that cannot read a token, in the README, before somebody discovers it:
+      `tmux attach` from ssh in iTerm2 shows `[[img:…]]` and no picture unless the pane sets `OSC_WRAP_INLINE=on`.
 - [x] measure the outcome rather than the implementation, for three shapes of it: a browser that attaches after the
       picture was printed, a reattach at a different viewport size, and a pane that never received image bytes at
       all - all three put the picture on the anchor's reserved rows (`hack/image-anchor-cases.sh`). A wheel scroll
@@ -785,15 +784,83 @@ from outside, which is why both reports could only be phrased as vanishing.
 After: 24 asserted looks over 3 runs, 0 failures, with the drawn bottom edge checked against the top of the anchor's
 own row (0.0 cells apart in every case) so a picture drawn at the right size in the wrong place fails the case.
 
+### Fifth half shipped (07/11): the token is the picture's top-left cell, and anchoring is on
+
+The same front end reported the same class of failure again the next afternoon - a picture that displays and scrolls
+fine, vanishes on a wheel scroll, comes back "under some situations" on a window resize, and after a pane split sits
+over another pane's prompt - with the guess that it might be a canvas problem, and the proposal that the answer is a
+magic string in the text with the picture's top-left anchored to it. The measurements said which half of that was
+already true and which half was the bug:
+
+- The pods were running the anchor *code* (`da8d993`) with `OSC_WRAP_ANCHOR` unset and one stale file in
+  `.slopyphus/images`, which is the description of a feature that is not on. What those screenshots showed was the
+  byte renderer doing what it was measured to do: tmux reprints text and re-emits no image, and `addon-image` keeps
+  its images attached to buffer lines of its own.
+- The anchor's geometry was wrong in the direction the proposal pointed at. The token used to be printed *below* the
+  space it reserved and the picture drawn upward from it, which means the emptiness the picture depends on sits
+  before the record in stream order. tmux reflow inserts rows into the lines that wrap, so a long line above the
+  picture can wrap into the rows it was promised, and the guard correctly refuses to draw over text - which is what
+  "comes back under some situations" means. Printing the token first, at column 0 of its own row, and reserving the
+  token's row plus the `rows-1` below it puts the reserved emptiness *after* the record, and it is the token's cell
+  the picture is anchored to, which is what an inline image actually uses: the cursor cell.
+
+So `anchor_line` is now `\r\n` + dim token + `\r` (the bare CR matters: it returns to column 0 without leaving the
+row, and an image that arrives after the cursor has left its own row is a caption, not an anchored picture - the new
+check says exactly that), the client draws downward from the anchor row, and a token whose row also carries some
+body's sentence is refused - a reflowed sentence is not something a picture may cover. 76 relay checks pass; the
+browser harness measures 8 looks per run over `emit`, `reattach`, `text-only`, `copy-mode up two half-pages and
+back`, and `split-window -v`, and two consecutive runs gave 16 looks with 0 failures, every one of them 0.0 cells
+from the top of its own anchor row and 0.0% off the height its row count implies.
+
+The switch itself is `tools/pi-images.sh` defaulting `OSC_WRAP_ANCHOR=1`, which is where a pane's relay is actually
+started - not in the cluster manifests. `OSC_WRAP_ANCHOR=0` restores the byte stream and `OSC_WRAP_INLINE=on` sends
+both, which is the escape hatch for a terminal that cannot read a token.
+
+### The resize symptom, measured, was tmux's own padding over the picture's rows
+
+The new `anchor-narrow` case put a long line above a picture, narrowed the pane to 40 columns while nobody was
+looking, and attached a 50-column browser. tmux's grid came out perfect - the anchor on its own row, twenty blank
+rows under it, the next text on row 22 - and the client drew nothing, saying:
+
+> `not drawing 3f36987a54.png: its own row also reads "│·········"`
+
+which is the first time this feature has been able to state which of its two failure shapes it is in. The picture
+was not lost; it was *refused*, by a rule doing its job correctly on input that looked like twenty rows of writing.
+The writing is tmux's: when a client is wider than the window it is attached to, tmux draws the pane's right border
+at the window edge and fills the remaining columns with `·`, on every row. `window-size largest` in `.tmux.conf` -
+added deliberately so a narrow laptop cannot shrink an agent's pane - guarantees that situation for anyone whose
+browser is wider than the pane. So the client was being shown `│·········` on the picture's reserved rows and told
+there was text there, and the correct answer to text there is to not draw.
+
+That is "resizing the window brings it back under some situations" from the side where it is a refusal: the resize
+that makes the client wider than the window is the resize that adds the padding, and the one that does not is the
+one that draws. The addon now finds the column tmux starts its chrome at - a `│` or `┃` followed by nothing but
+padding to the end of the line, on most rows of the viewport, taking the smallest such column so a genuine box
+drawing character inside real content is not mistaken for the edge - and judges emptiness only in the columns before
+it. It also limits a picture's width to that column, so a picture cannot draw over a pane border.
+
+Measured after: 9 looks per run over five cases, two consecutive runs, 18 looks, 0 failures. In the narrow case the
+picture is drawn 280x140 in a 40-column pane - its aspect intact, its top edge 0.0 cells from the anchor's row, its
+right edge at the border - and 10.7 cells short of the 20 rows it was reserved, which is now reported as a
+measurement instead of being called a failure: a reservation is a promise about space, not about size, and stretching
+a 2:1 picture to fill 20 rows in a 40-column pane is worse than leaving the space empty.
+
 ### What is still not known about a disappearance
 
 - Pi's own redraws are unmeasured. Pi's chat reflows as it types, and a reflow that moves a picture's rows moves the
   anchor with them - which is fine - but whether Pi *re-emits* the image bytes when it repaints its transcript has
   not been looked at, and with anchoring on, a re-emission would now be the only way its own redraw could draw it.
-- A horizontal split is a different case from the vertical one the harness measures: a narrower pane reflows text
-  into the rows a picture reserved, and the guard's answer there is that the text wins and no picture is drawn. That
-  is deliberate - a covered sentence is lost, a covered picture is only a lost picture - but it means a narrow pane
-  with a long line above an anchor shows the anchor and not the picture.
+- A pane narrower than the picture's aspect ratio allows is measured now (`anchor-narrow`): the picture is drawn at
+  its ratio inside the pane's own columns, shorter than its reservation, with blank reserved rows under it. What is
+  still not measured is the other half of that case - a narrow pane whose *text* reflows into the rows below an
+  anchor, where the guard's answer is that the text wins and no picture is drawn. That is deliberate, a covered
+  sentence being a lost sentence and a covered picture only a lost picture, but it has only been argued, not seen.
+- Whether the padding rule can mistake real output for chrome has not been tested against output that is itself
+  box-drawing: the rule asks for most of the viewport's rows to agree on the same edge column, and a Pi markdown
+  table is exactly a wall of `│` that most rows agree on - the measured shape of one in this session's own transcript
+  is rows ending in `│` at the table's right edge, which is the column this rule would pick, so a picture above
+  such a table would be narrowed to it. The threshold (half the viewport's rows) is what usually saves it, because a
+  picture's own reserved rows are blank and do not match. Argued from the code, not yet seen in a case.
 - Anchoring hides a picture from a terminal that cannot read an anchor. `tmux attach` from ssh in iTerm2 shows the
   token and nothing else. `--inline` is the answer and it is a per-pane decision, which is a sharp edge worth naming
   in the README.

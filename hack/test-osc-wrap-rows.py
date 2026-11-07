@@ -208,19 +208,26 @@ check("a relay with the anchor off - the shipped default - emits no anchor and s
 
 r = osc_wrap.Rewriter(True, anchor=True, term_size=(100, 30))
 out = r.feed(seq)
-anchor_bytes = b"\x1b[2m[[img:" + digest.encode() + b".png:%d]]\x1b[0m\r\n" % want_rows
-check("the anchor sits on the row below the reserved ones, dimmed and reset, carrying the rows it reserved",
-      out.endswith(b"\r\n" * want_rows + anchor_bytes), True)
+anchor_bytes = b"\r\n\x1b[2m[[img:" + digest.encode() + b".png:%d]]\x1b[0m\r" % want_rows
+check("the anchor is the first thing on its own row and owns the space below it, dimmed and reset",
+      out.endswith(anchor_bytes + b"\r\n" * want_rows), True)
 check("the row count in the anchor is the count the reservation used", want_rows > 0, True)
+# The token ends with a bare CR rather than CRLF on purpose. An inline image is anchored at the *cursor cell*, so
+# returning to column 0 without leaving the row is what makes the token's cell the picture's top-left cell. An
+# anchor whose row the cursor has already left puts the picture one row below the line that describes it, which is
+# the difference between an anchor and a caption.
+check("the cursor is left at column 0 of the token's row, where an inline image anchors",
+      (anchor_bytes.endswith(b"\r"), anchor_bytes.endswith(b"\r\n"), anchor_bytes.startswith(b"\r\n")),
+      (True, False, True))
 # The byte stream is what changed, and it changed on purpose. Two renderers drawing the same picture - the one the
 # bytes drive, which attaches an image to its own buffer lines, and the one the anchor drives, which draws where
 # the grid says - were measured disagreeing after a pane split, the picture ending up under the tmux status bar and
 # over another pane's prompt. An anchor is grid text; it cannot end up anywhere but where the pane put it.
 check("an anchored relay does not send the picture as bytes at all", (osc_wrap.INTRO in out, b"1337" in out), (False, False))
-check("and it still reserves the rows the picture needs, in the pane's own grid", out, b"\r\n" * want_rows + anchor_bytes)
+check("and it still reserves the rows the picture needs, in the pane's own grid", out, anchor_bytes + b"\r\n" * want_rows)
 inline_out = osc_wrap.Rewriter(True, anchor=True, inline=True, term_size=(100, 30)).feed(seq)
-check("asking for --inline sends the plain relay's bytes, in the plain relay's order, plus the anchor",
-      inline_out, osc_wrap.wrap(seq) + b"\r\n" * want_rows + anchor_bytes)
+check("asking for --inline sends the plain relay's bytes, in the plain relay's order, with the anchor ahead of them",
+      inline_out, anchor_bytes + osc_wrap.wrap(seq) + b"\r\n" * want_rows)
 check("the saved file is byte-identical to the picture that was passed", open(os.path.join(tmp, digest + ".png"), "rb").read(), IMG)
 check("the id is a prefix of the content hash, so the same picture twice is one file", len(os.listdir(tmp)), 1)
 r.feed(seq)
