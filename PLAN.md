@@ -628,8 +628,9 @@ default. ttyd fork d101262, `src/html.h` rebuilt by `hack/build-ttyd-client.sh`,
 
 `--anchor` (and `OSC_WRAP_ANCHOR`, default **off** until the browser side can read them) decodes each OSC 1337
 payload it passes, writes it to the pane's own `.slopyphus/images/<10 hex of sha256>.<png|gif|bmp|jpg>`, keeps the
-row reservation, and prints one dim text line - `[[img:<10 hex>]]` - on the row below the reserved ones. Saving and
-anchoring are one switch: a file no anchor names is a picture nothing will ever ask for. Retention is the newest
+row reservation, and prints one dim text line - `[[img:<10 hex>.<ext>:<rows>]]`, the file it wrote and the number
+of rows it reserved - on the row below the reserved ones. Saving and anchoring are one switch: a file no anchor
+names is a picture nothing will ever ask for. Retention is the newest
 `OSC_WRAP_IMAGE_KEEP` (default 200) files, pruned by mtime, and pruning only ever touches names the relay wrote.
 
 Measured with `hack/live-pi-wrap.sh` (the real relay running inside a scratch tmux 3.6a pane, fed the bytes
@@ -645,6 +646,49 @@ receives contain the original `ESC ]1337;` introducer and no `ESC Ptmux;`, which
 for tmux's **input** side, to get a sequence through a server that has no handling for 1337 at all - but it means a
 byte-level probe of the client's stream cannot confirm the wrapper was used. Probe the pane side instead.
 
+
+### Third half shipped (07/11): the browser draws the picture from the anchor
+
+ttyd 0f299b7 adds `html/src/components/terminal/xterm/addons/image-anchor.ts`: on every render it reads the anchor
+lines out of the buffer, asks this server for the file each one names, and draws that file across the rows above
+the line. `hack/image-anchor-cases.sh` measures it in the container this repo's image build produces, with a real
+Chrome attached over CDP, and it attaches **after** the pane has finished printing - the ordering
+`hack/image-cases.sh` has to fight against is the claim being tested here, because a picture that arrives from a
+text anchor does not care when the viewer showed up. Three looks, all passing:
+
+- `anchor-emit` - the relay, `--anchor` on, relaying a program that prints Pi's own image bytes. The pane's grid
+  holds `[[img:3f36987a54.png:20]]` and `.slopyphus/images` holds one file. The browser draws 180000 pixels (88800
+  red, 81688 blue) in a 600x300 box on a 160x52 grid whose measured cell is 15.0 px: 300 px drawn against the
+  300.0 px the anchor's own row count implies, 0.0% apart. The relay reserved rows in cells for a cell size it
+  could not know and the browser measured the cell it was actually given, and the two agree about a number neither
+  one could have measured alone.
+- `anchor-reattach` - the same pane looked at again by a second client at 900x500, which is a client reattach and a
+  pane resize in one event: tmux reprints the whole pane for the new client at the new size. Grid 111x32, cell
+  still 15.0 px (a cell follows the font, not the viewport), same 600x300 picture on the same 20 rows, with the
+  image bytes long gone from the wire.
+- `anchor-text-only` - the decisive one. The pane is handed the anchor line and is **never given image bytes at
+  any point**; the picture reaches the browser as a file the harness put on disk. 45000 pixels, a 300x150 box,
+  exactly the 10 rows the anchor claimed.
+
+Two failures had to be measured before any of that worked, and both are written into the addon rather than just
+fixed, because neither one is visible from the code:
+
+- The scan cache key did not contain the cursor. Writing text into a viewport that is already the right size moves
+  `viewportY`, `baseY`, the buffer length and the grid size none at all, so a client attaching to a pane whose
+  picture had already been printed cached "there are no anchors here" permanently - with the line sitting in the
+  buffer on the row the scan was looking at, and the picture fetching fine from that same browser at
+  200/`image/png`/342 bytes.
+- The canvas was underneath everything. Both screenshots came back showing empty reserved rows and a printed anchor
+  line, in runs where the canvas held 180000 painted pixels of flag. `getComputedStyle` on a live pane: the link
+  layer canvas is z-index 2, the WebGL text canvas is `auto` (which behaves as 0), the helper layers are 5 and
+  above - and this canvas, attached before `open()` had built its own, was the first child of `.xterm-screen`. It
+  asks for 3 now, which clears every canvas a pane has without reaching the input helpers. The harness reports the
+  stack alongside the pixels for that reason: painted pixels and visible pixels turned out to be two different
+  measurements.
+
+A picture is drawn only while the rows it would cover are still blank. A pane narrow enough to reflow a long line
+writes text into reserved rows, and a sentence covered by a picture is a lost sentence where a picture covered by
+a sentence is only a missing picture.
 
 ### The shape of the fix
 
@@ -668,7 +712,7 @@ byte-level probe of the client's stream cannot confirm the wrapper was used. Pro
       `hack/front-cdp.mjs`; the served bundle contains `enableContextMenuGate` (1 occurrence) and the option name
       appears in ttyd's own startup log line
 - [x] relay: decode the payload, write `.slopyphus/images/<sha>.<ext>`, emit the anchor token, keep the row
-      reservation; extended `hack/test-osc-wrap-rows.py` (10 new checks, 45 total, including byte-identity of the
+      reservation; extended `hack/test-osc-wrap-rows.py` (46 checks, all passing, including byte-identity of the
       saved file, the hash-prefix naming, refresh-not-duplicate, and mtime pruning with the ages stated rather than
       left to the clock). Off by default, so the shipped byte stream is unchanged - the byte-exactness check against
       `hack/pi-image-bytes.mjs --wrap-tmux` still passes
@@ -682,10 +726,17 @@ byte-level probe of the client's stream cannot confirm the wrapper was used. Pro
       refused with the same 404 as a picture that is merely absent. The NUL case is answered by libwebsockets
       closing the connection rather than by this handler, which the probe records as `noresponse` instead of
       pretending it was a 404.
-- [ ] client addon: anchor scan, image store, redraw on render/resize/scroll
+- [x] client addon: anchor scan, image store, redraw on render/resize/scroll (ttyd 0f299b7, `src/html.h` rebuilt
+      by `hack/build-ttyd-client.sh`, pinned by slopyphus below)
 - [ ] turn the anchor on in the entrypoint, once the client understands it, so users never see a token with no picture
-- [ ] measure the outcome rather than the implementation: CDP screenshots showing the image still present after a
-      wheel scroll, a collapsed-to-expanded pane, a tmux pane menu, and a client reattach
+- [x] measure the outcome rather than the implementation, for three shapes of it: a browser that attaches after the
+      picture was printed, a reattach at a different viewport size, and a pane that never received image bytes at
+      all - all three put the picture on the anchor's reserved rows (`hack/image-anchor-cases.sh`). A wheel scroll
+      into copy-mode and a tmux pane menu are still measured only in tmux's grid (`hack/live-pi-wrap.sh`), where
+      the anchor survives and the bytes do not, not yet in a browser.
+- [ ] stop sending the inline burst, or keep it: today a picture is drawn twice on a fresh frame - once by
+      `@xterm/addon-image` from the bytes and once by this addon from the anchor - which is invisible because they
+      draw the same thing on the same rows, and has not been measured as a cost.
 - [ ] README (keyboard table, `PI_PANE_MODE`, what an image now is) and this plan updated with what was learned
 
 ### Open questions to settle while building
