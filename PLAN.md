@@ -919,3 +919,10 @@ structurally blind to half of what happens. Real input goes through `hack/front-
 Push order: commit in the fork (`vendor/ttyd`, `vendor/xterm.js`) → push fork → re-pin submodule →
 commit main repo → wait for Woodpecker build/ci/lint → wait for pods to roll → user validates from
 the front desktop.
+
+# Standing costs
+
+`TECH-DEBT.md` is the list of what this feature set knowingly carries: what each cost is, whether it was
+measured or only argued from the code, and what paying it off looks like. It is written for the next
+session rather than for this one, so a claim there that says "argued, no case covers it" should be read as
+an open risk rather than as something settled.
