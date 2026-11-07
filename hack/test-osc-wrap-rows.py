@@ -134,7 +134,13 @@ check("an unreadable image         -> nothing reserved",
 #   Pi's sequence for the 560x280 test image: File=inline=1;size=342;width=80;height=auto, inherent 160x80,
 #   drawn by the addon 560x280 px = 80 x 7.00px, which covers 18.7 rows bare and 18.3 rows under tmux.
 print("\nthe shipped defaults, against the browser that was actually measured")
-pi_seq = subprocess.run(["node", os.path.join(REPO, "hack", "pi-image-bytes.mjs"), "/tmp/image-test/flag.png"],
+FIXTURE = "/tmp/image-test/flag.png"
+if not os.path.exists(FIXTURE):
+    # The measured comparison below is only as good as the file Pi was measured against, and a freshly started
+    # container has no /tmp/image-test. hack/make-test-image.py is in the repository, so the fixture is rebuilt
+    # rather than the comparison quietly skipped.
+    subprocess.run([sys.executable, os.path.join(REPO, "hack", "make-test-image.py")], capture_output=True)
+pi_seq = subprocess.run(["node", os.path.join(REPO, "hack", "pi-image-bytes.mjs"), FIXTURE],
                         capture_output=True)
 if pi_seq.returncode != 0:
     print("  (skip: hack/pi-image-bytes.mjs did not run; /tmp/image-test/flag.png is made by hack/make-test-image.py)")
@@ -202,8 +208,9 @@ check("a relay with the anchor off - the shipped default - emits no anchor and s
 
 r = osc_wrap.Rewriter(True, anchor=True, term_size=(100, 30))
 out = r.feed(seq)
-check("the anchor sits on the row below the reserved ones, dimmed and reset",
-      out.endswith(b"\r\n" * want_rows + b"\x1b[2m[[img:" + digest.encode() + b"]]\x1b[0m\r\n"), True)
+check("the anchor sits on the row below the reserved ones, dimmed and reset, carrying the rows it reserved",
+      out.endswith(b"\r\n" * want_rows + b"\x1b[2m[[img:" + digest.encode() + b".png:%d]]\x1b[0m\r\n" % want_rows), True)
+check("the row count in the anchor is the count the reservation used", want_rows > 0, True)
 check("everything before the anchor is the same bytes the relay emitted without it", out[: len(before)], before)
 check("the saved file is byte-identical to the picture that was passed", open(os.path.join(tmp, digest + ".png"), "rb").read(), IMG)
 check("the id is a prefix of the content hash, so the same picture twice is one file", len(os.listdir(tmp)), 1)

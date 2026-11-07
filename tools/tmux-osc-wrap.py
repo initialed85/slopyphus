@@ -59,11 +59,11 @@ An image whose format the relay cannot read reserves nothing, which is the behav
 than a wrong guess.
 
 It can also name the pictures it passes. `--anchor` writes each image under the pane's own working directory and
-prints a dim line of text - `[[img:<10 hex>]]` - on the row below the space it reserved. That line is the point:
-tmux's grid holds cells and stores no copy of an inline image, so every repaint (a wheel scroll, a pane resize, a
-pane menu, a client reattach) erases a picture that was only ever a burst of bytes, while a line of text survives
-all of them. The browser side is what turns the line back into the picture; until it exists the flag stays off,
-because an anchor nobody understands is just text in someone's transcript.
+prints a dim line of text - `[[img:<10 hex>.<ext>:<rows>]]` - on the row below the space it reserved. That line is
+the point: tmux's grid holds cells and stores no copy of an inline image, so every repaint (a wheel scroll, a pane
+resize, a pane menu, a client reattach) erases a picture that was only ever a burst of bytes, while a line of text
+survives all of them. The browser side is what turns the line back into the picture; until it exists the flag stays
+off, because an anchor nobody understands is just text in someone's transcript.
 """
 
 import base64
@@ -196,9 +196,9 @@ class Rewriter:
                         # An anchor is only worth printing when the room the picture needs is also known. An
                         # anchor the browser cannot size is a picture drawn over somebody's text.
                         raw, kind = decode_image(payload)
-                        digest = save_image(raw, kind) if raw else ""
-                        if digest:
-                            out += anchor_line(digest)
+                        name = save_image(raw, kind) if raw else ""
+                        if name:
+                            out += anchor_line(name, n)
                             self.stats["anchors"] += 1
         return bytes(out)
 
@@ -398,10 +398,12 @@ def decode_image(payload: bytes):
 
 
 def save_image(raw: bytes, kind: str) -> str:
-    """Write the picture under the pane's own working directory and return the id its anchor carries.
+    """Write the picture under the pane's own working directory and return the file name its anchor carries.
 
     The name is a prefix of the content hash, so the same picture read twice is one file, a viewer can cache it
-    forever, and nothing here needs a database or a manifest. Only files this function wrote are ever pruned.
+    forever, and nothing here needs a database or a manifest. The name is returned whole - extension included - so
+    the anchor can name exactly the file the server's route validates, and a browser never has to guess which of
+    the four extensions a picture was saved under.
     """
     digest = hashlib.sha256(raw).hexdigest()[:10]
     name = f"{digest}.{kind}"
@@ -417,7 +419,7 @@ def save_image(raw: bytes, kind: str) -> str:
     except OSError as exc:
         sys.stderr.write(f"tmux-osc-wrap: could not save {name}: {exc}\n")
         return ""
-    return digest
+    return name
 
 
 def prune_images():
@@ -435,8 +437,8 @@ def prune_images():
             pass
 
 
-def anchor_line(digest: str) -> bytes:
-    """Where a picture belongs, written as ordinary text so tmux keeps it.
+def anchor_line(name: str, rows: int) -> bytes:
+    """Where a picture belongs and how much room it needs, written as ordinary text so tmux keeps it.
 
     tmux's grid stores cells. `capture-pane -p -e` on a pane that has just drawn an inline image reports zero
     copies of it in the pane's history, so every repaint is destructive: `WheelUpPane -> copy-mode -e` reprints a
@@ -445,10 +447,14 @@ def anchor_line(digest: str) -> bytes:
     comes back" behaviour the row reservation alone could not fix.
 
     A line of text is the one thing that survives all of that, so the record is text: dimmed so it reads as a
-    marker rather than as content, on the row immediately below the reserved ones, carrying the id of the saved
-    file. The browser draws the picture in the reserved rows above it, sized the way reserve_rows sized them here.
+    marker rather than as content, on the row immediately below the reserved ones, carrying the saved file's name
+    and the number of rows above it the picture was given. The row count travels with the anchor rather than being
+    recomputed at draw time because the reservation is the anchor's own history - the browser has no way to tell
+    reserved blank rows from blank rows the application printed - and a row count in cells is the one measurement
+    that stays correct when the pane is resized: cells survive a reflow, pixels do not. The name is the same string
+    the server's image route validates, which is what lets a browser ask for the picture without searching.
     """
-    return b"\x1b[2m[[img:" + digest.encode("ascii") + b"]]\x1b[0m\r\n"
+    return b"\x1b[2m[[img:" + name.encode("ascii") + b":%d]]\x1b[0m\r\n" % rows
 
 
 def main():

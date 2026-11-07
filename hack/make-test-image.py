@@ -5,6 +5,7 @@ A 160x80 half-red half-blue flag is for looking at with human eyes. A 10x10 soli
 byte-level experiments, where the point is the escape sequence around the image rather than the image
 itself. Keeping them tiny means a byte capture is readable.
 """
+import os
 import struct
 import zlib
 
@@ -15,6 +16,11 @@ def chunk(tag, data):
 
 
 def png(path, width, height, pattern):
+    # The probes that read these files assume /tmp/image-test; a freshly started container has no such directory
+    # and a probe that cannot make its own fixture is a probe that skips the check it was written for.
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     rows = b""
     for y in range(height):
         row = b""
