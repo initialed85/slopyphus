@@ -7,3 +7,6 @@ _SERVICES.md
 # checkout. Those files are the user's, not the repository's - and a screenshot of a terminal is one
 # careless `git add -A` away from being committed into the history of the project it was taken in.
 .slopyphus/
+
+# Importing tools/tmux-osc-wrap.py from a test leaves bytecode next to it.
+__pycache__/

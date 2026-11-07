@@ -127,6 +127,29 @@ python3 /tmp/osc-wrap.py sh -c 'printf hello; cat /tmp/pi-seq.bin; echo CASE-INN
 echo CASE-RAN-MARKER
 EOS
 
+  # The A/B pair for row reservation. xterm.js anchors an inline image at the cursor cell and leaves the cursor
+  # there, so whatever the program prints next lands on top of the picture, and the relay can instead print
+  # blank rows for the rows the picture covers. These two cases differ only by --no-reserve on the relay, so
+  # whatever the browser reports differently is the effect of that one decision and nothing else. CASE-SIZE is
+  # printed into the pane because the row arithmetic depends on the pane's own cell count, and the harness
+  # should check it against the size the pane actually had rather than a size assumed here.
+  cat >"$WORK/case-rows-baseline.sh" <<EOS
+echo "CASE-SIZE \$(tput cols 2>/dev/null || echo ??)x\$(tput lines 2>/dev/null || echo ??)" | tee /tmp/case-size.txt
+echo CASE-BEFORE-MARKER
+echo '$SEQ_B64' | base64 -d > /tmp/pi-seq.bin
+echo '$SHIM_B64' | base64 -d > /tmp/osc-wrap.py
+python3 /tmp/osc-wrap.py --no-reserve sh -c 'cat /tmp/pi-seq.bin; echo CASE-AFTER-MARKER'
+echo CASE-RAN-MARKER
+EOS
+  cat >"$WORK/case-rows-fix.sh" <<EOS
+echo "CASE-SIZE \$(tput cols 2>/dev/null || echo ??)x\$(tput lines 2>/dev/null || echo ??)" | tee /tmp/case-size.txt
+echo CASE-BEFORE-MARKER
+echo '$SEQ_B64' | base64 -d > /tmp/pi-seq.bin
+echo '$SHIM_B64' | base64 -d > /tmp/osc-wrap.py
+python3 /tmp/osc-wrap.py  sh -c 'cat /tmp/pi-seq.bin; echo CASE-AFTER-MARKER'
+echo CASE-RAN-MARKER
+EOS
+
   cat >"$WORK/case-pi-kitty.sh" <<EOS
 # Pi's graphics sequences handed to tmux as ordinary pane output: tmux parses the graphics protocol itself,
 # so no passthrough wrapper is involved and none is needed. Whether the browser sees a picture is the question
@@ -244,7 +267,17 @@ cat >"$WORK/dom.js" <<'EOS'
   return {
     canvases,
     // Whether the pane shows a shell at all, so "no image" can be told apart from "no pane".
-    text: (document.querySelector('.xterm-rows')?.textContent ?? '').trim().slice(0, 160),
+    text: (document.querySelector('.xterm-viewport')?.textContent ?? '').trim().slice(0, 160),
+    // The pixel box the renderer laid the viewport out in, measured rather than assumed: a pane reports cells
+    // to its program and pixels to its viewer, and dividing one by the other is what turns a picture's pixel
+    // box into rows. Text is not readable from this DOM at all -- ttyd's xterm.js renders glyphs into canvas
+    // layers and leaves the accessibility layer unrendered (measured: no element under .xterm carries text),
+    // which is why the row evidence for a tmux case comes from tmux's grid instead.
+    screen: (() => {
+      const el = document.querySelector('.xterm-screen') || document.querySelector('.xterm-viewport');
+      const r = el ? el.getBoundingClientRect() : null;
+      return r ? { w: Math.round(r.width), h: Math.round(r.height) } : null;
+    })(),
   };
 })()
 EOS
@@ -299,6 +332,22 @@ run_case() {
 
   wait "$cdp_pid"
   out=$(cat "$json")
+
+  # Row evidence, taken from the pane itself: tmux knows its grid's cell count and every row of text in it,
+  # which is what a picture's pixel box is compared against. capture-pane never sees the image itself (a
+  # passthrough sequence is written to whoever is looking and never enters the grid), so the grid is text only
+  # and the browser is the picture, and the two are compared by geometry rather than by guesswork.
+  # The pane reports its own cell count to whoever asks it, which for a bare pane is only itself, so the case
+  # writes it out where the harness can read it back. tmux can answer the same question from outside.
+  docker exec "$container" cat /tmp/case-size.txt >"$WORK/grid-$variant-$name.size" 2>/dev/null || true
+  if [ "$variant" = tmux ]; then
+    docker exec "$container" tmux display-message -p '#{pane_width}x#{pane_height}' \
+      >>"$WORK/grid-$variant-$name.size" 2>/dev/null || true
+    # Viewport rows only: a picture's pixel box maps onto the rows currently on screen, and a history capture
+    # would number rows from somewhere in the scrollback instead.
+    docker exec "$container" tmux capture-pane -p >"$WORK/grid-$variant-$name.txt" 2>/dev/null || true
+    docker exec "$container" tmux capture-pane -p -a -S -120 >"$WORK/grid-$variant-$name.hist" 2>/dev/null || true
+  fi
 
   pick() { printf '%s' "$out" | grep -o "\"$1\": *[0-9]*" | grep -o '[0-9]*' | sort -rn | head -1; }
   painted=$(pick paintedPixels)

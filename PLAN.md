@@ -260,10 +260,42 @@ Open ends:
 - Measurement trap found while verifying: `tmux capture-pane` taken just after a pane's last client detached can
   show a blank screen. Calibrate with a `tmux send-keys` string before believing a blank pane is empty.
 
+### The key that reaches that upload path (Ctrl+V on Linux, Cmd+V on macOS)
+
+A user on a Linux box pressed Ctrl+V and nothing arrived. It had worked on their Mac, which is the whole diagnosis:
+the shortcut is platform-specific in the browser, and the client was intercepting the wrong one.
+
+Measured in a container running the shipped ttyd and the shipped client, typing into a `cat` pane through CDP raw
+key events (`hack/keys-case.sh`, which records the pane's own stdin with `script(1)` and deliberately writes no
+bytes itself, so anything in the recording came from the client):
+
+| keys | bytes that reached the pane before the fix | after |
+|---|---|---|
+| Ctrl+V | `16` — a literal device-control-1 | nothing |
+| Ctrl+Shift+V | nothing | `16` |
+| Cmd+V | nothing | nothing |
+| Ctrl+V + Ctrl+Shift+V + Cmd+V together | `16` | `16`, and it is the Ctrl+Shift+V one |
+
+Chrome does not send Ctrl+V to the page as text: Linux and Windows deliver it as a `keydown` only, macOS delivers
+Cmd+V the same way, and Ctrl+Shift+V is silent because it is the terminal's own literal-next chord. xterm.js
+handled the `keydown` by writing `0x16` into the connection and calling `preventDefault()`, which is what cancelled
+the browser paste. `hack/keys-case.sh --paste-text` shows the difference on the other side of the same handler: a
+*dispatched* `paste` event already worked, because ttyd's capture-phase listener on the parent element never looked
+at modifier keys — only the real keyboard path was broken.
+
+The fix is in the fork's `attachCustomKeyEventHandler` (`vendor/ttyd/html/src/components/terminal/xterm/index.ts`):
+V with Ctrl and nothing else refuses both the `keydown` and the `keypress`, so xterm writes nothing and the browser
+paste reaches its own `paste` listener, where ttyd's upload path takes it — file clipboard goes to the upload
+channel, text clipboard goes to the pane. Ctrl+Shift+V is answered directly with `0x16`, which keeps literal-next
+alive and is the only way to get that byte into a pane from a browser: Ctrl+Shift+V used to produce no bytes at all,
+measured, so the old behaviour was not "terminal-native literal next", it was a no-op.
+
 ## Task 4 — show images inline (Sixel / iTerm inline images)
 
-Status: **closed as deferred by the pane's owner (home-ops): tmux stays, images wait.** The measurements stand
-as the reason, and the placement that would have made images work without a trade does not exist.
+Status: **shipping.** It was deferred first as "tmux stays, images wait", then reopened by measurement (below),
+then closed by a trade the pane's owner accepted: inline images are the default pane invocation, and what they
+cost is Pi's fullscreen UI, which is now a switch (`PI_PANE_MODE=images|fullscreen`) rather than a fork of the
+deployment.
 
 The claim this task existed to test is the obvious one: "ttyd loads `@xterm/addon-image`, therefore images
 work". That is true of the far end of the chain and useless as a conclusion, because a pane's bytes are
@@ -510,6 +542,63 @@ The tmux man-page report is still unfiled for the same reason as before: no `gh`
 someone else's name needs a route handed to this pod. The Pi-side ask is now concrete enough to file too, in one
 sentence: Pi emits images in a protocol the terminal cannot show and switches the one protocol its own renderer
 can show off in fullscreen; either emit sixel when `$TMUX` is set, or emit tmux's own passthrough wrapper.
+
+### Drawing an image without moving the cursor, which is the last thing the pane owed
+
+With the wrapper carrying Pi's sequences into the pane, the picture appeared and the next line of text landed on top
+of it. That is not tmux and not Pi: `@xterm/addon-image` paints on a canvas layer (`xterm-image-layer`) that sits
+outside the buffer, so drawing a 280-pixel-tall picture leaves the cursor exactly where the sequence arrived. Pi
+believes it printed one line. The terminal knows better and nobody tells it.
+
+`hack/image-cases.sh` runs the pair (`rows-baseline` with the relay's reservation off, `rows-fix` with it on) and
+`hack/image-rows-report.py` reads the same case three ways — what the relay's arithmetic says, what the renderer
+drew (the canvas's painted pixels and bounding box, converted to rows by the client's own measured grid), and where
+the text markers actually landed in `capture-pane`:
+
+| case | picture drawn | grid rows the markers landed on | verdict |
+|---|---|---|---|
+| `rows-baseline` (relay, tmux) | 153440 px, rows 2.0–20.3 | BEFORE 1, AFTER 2, RAN 3 | text OVERLAPS the picture |
+| `rows-fix` (relay, tmux) | 156800 px, rows 2.0–20.3 | BEFORE 1, AFTER 22, RAN 23 | text clears the picture |
+| `rows-fix` (no tmux) | 156800 px | no grid, `capture-pane` needs tmux | screenshot is the evidence |
+
+The relay's prediction and the observed cursor advance agree exactly: 20 rows reserved, 20 rows the pane actually
+moved, 18.3 rows the picture covered. Two rows of slack is the estimate being an estimate; the direction is chosen
+on purpose, because a reservation that overshoots costs blank rows and a reservation that falls short draws text on
+someone's screenshot.
+
+What the arithmetic reads, in the order the reference renderer does it. The header fields come from the payload
+header, and `IIPHeaderParser` is strict in a way that matters: the header ends at the *first* colon, so a `name=`
+carrying base64 `=` padding cannot be confused for a field separator. The frame size comes from the image bytes
+themselves, mirroring `IIPImageParser`'s magic list: PNG `IHDR`, JPEG's first `SOF0/1/2` (skipping other markers,
+which is how a `DHT` before the frame is survived), GIF's logical screen descriptor, BMP's DIB width and height
+with a negative height read as top-down rows. Anything else reserves nothing rather than guessing.
+`IIPHandler._resize` then decides the drawn frame: `width` and `height` default to the pane width and `auto`, a
+percentage is a fraction of the pane, `auto` means keep the aspect, and when both sides are given the *larger*
+scale wins (`wScale >= hScale`) rather than the one the caller asked for. The row count is that frame's height in
+rows, capped to leave one row for the cursor.
+
+The cell geometry is measured rather than assumed, and the harness says so out loud: a 160×52 client viewport of
+1120×780 gives 7.00 px × 15.00 px per cell (tall cell = 0.467 of its width), and through tmux 160×51 gives
+7.00 × 15.29 (0.458) because tmux keeps a status line's worth of rows out of the viewport. The shipped defaults are
+ratio 0.5 and a 15 px cell; `OSC_WRAP_CELL_RATIO`, `OSC_WRAP_CELL_HEIGHT_PX`, `OSC_WRAP_ROWS=0` and `--no-reserve`
+are the knobs, and the reservation is independent of the wrapper — a pane with no tmux needs the blank rows just as
+much, which the third row of the table above is there to show.
+
+One discovery worth keeping: Pi resizes on the way out. The 560×280 test image left Pi's encoder as
+`File=inline=1;size=342;width=80;height=auto` carrying a 160×80 PNG, so the relay sizes *Pi's frame*, not the
+user's file. The rendered result is the same 560×280 px on screen (80 columns × the measured 7.00 px cell), which
+is the check that the two are consistent rather than a coincidence.
+
+`hack/test-osc-wrap-rows.py` is the standing test for all of it — 35 checks, all passing: header parsing against
+real PNG/JPEG/GIF/BMP bytes built in the test, the resize arithmetic case by case, the reservation against the
+measured browser geometry, and byte-for-byte identity with `hack/pi-image-bytes.mjs --wrap-tmux` so the reservation
+cannot quietly change the wrapper. A non-image OSC 1337 is still wrapped (tmux discards every OSC 1337, `grep -c
+1337 input.c` is 0) and reserves no rows, because inventing a picture that was never drawn is its own bug.
+
+What is not adaptive: the ratio is one number measured at `fontSize=12` in this client with this font. A bigger
+font, a different DPI, or a client that reports cell pixels to tmux changes the tall-cell fraction, and the
+reservation moves with the constant rather than with the terminal. If a future client reports `client_cell_pixels`
+to tmux, the honest change is to ask tmux instead of carrying a constant.
 
 
 ## Validation recipe

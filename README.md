@@ -26,6 +26,13 @@ hostname, which is the agent name in compose and Docker, but a generated pod nam
 
 `MODEL` is required (the entrypoint fails loudly rather than starting an agent with no model).
 
+`PI_PANE_MODE` chooses what the pane runs: `images` (the default) starts Pi through `pi-images`, which is Pi's
+non-fullscreen UI behind a relay that wraps every inline-image sequence in tmux's passthrough escape — the only
+shape measured to put a picture on screen in a pane. `fullscreen` starts plain `pi`, which gets Pi's alternate-screen
+TUI back and cannot show inline images at all, because Pi switches its own image output off in that mode and the
+protocol it uses there (kitty graphics) has no decoder in this stack. The trade is real either way, which is why
+it is a switch and not a surprise.
+
 # The whole stack (compose)
 
 ```sh
@@ -152,6 +159,13 @@ Service does not resolve 502s its own pane and nothing else.
 | `Alt+Shift+Enter` | expand the active pane to the whole viewport; again to put it back |
 | `Alt+Shift+G` | broadcast: every keystroke goes to every pane at once (all panes turn red) |
 | `Shift+Enter` in a pane | newline — translated to `Ctrl+J`, which is what pi accepts; ttyd/xterm eats `Shift+Enter` |
+| `Ctrl+V` (Linux/Windows) or `Cmd+V` (macOS) in a pane | paste: a file clipboard is uploaded to the pane's `.slopyphus/uploads/` and its path is typed into the pane; a text clipboard goes to the pane as text |
+| `Ctrl+Shift+V` in a pane | the literal `0x16` byte — the terminal's own "literal next" — sent by the client rather than swallowed by it |
+
+`Ctrl+V` is the browser's paste on Linux and Windows and it used to be eaten: xterm.js answered the keydown by
+writing `0x16` into the connection and preventing the default, so no paste ever happened. Cmd+V was already working,
+which is why the bug looked like a Mac-only feature. `hack/keys-case.sh` measures the key path end to end by typing
+real key events into a `cat` pane and recording what the pane's application reads from its own stdin.
 
 ## Panes and scrollbars
 

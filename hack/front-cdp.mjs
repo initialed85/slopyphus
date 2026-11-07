@@ -81,8 +81,12 @@ const has = (name) => process.argv.includes(`--${name}`);
 
 // Ordered --key list, and the CDP modifier bitmask Chrome expects (alt 1, ctrl 2, meta 4, shift 8).
 const keySpecs = [];
+// Input.dispatchKeyEvent's `commands` field: Chrome's own editing command for the key event (`paste`,
+// `selectAll`, ...). It is how a headless run can ask "would this keystroke paste?" without a desktop.
+let keyCommands = [];
 for (let i = 0; i < process.argv.length; i++) {
   if (process.argv[i] === "--key") keySpecs.push(process.argv[i + 1]);
+  if (process.argv[i] === "--key-commands") keyCommands = process.argv[i + 1].split(",").map((x) => x.trim()).filter(Boolean);
 }
 const keyGapMs = Number(arg("key-gap-ms", 220));
 
@@ -273,10 +277,19 @@ if (keySpecs.length) {
     "focus-expression",
     `(() => { const t = document.querySelector('.xterm-helper-textarea'); t && t.focus(); return !!t; })()`,
   );
-  await send("Runtime.evaluate", { expression: focusExpression }, sessionId);
+  // The focus expression is also where a run seeds the browser clipboard, so its return value is part of the
+  // measurement: { copied: true } says the clipboard really holds the seed, which is what separates "the
+  // browser refused to paste" from "there was nothing to paste".
+  const focused = await send("Runtime.evaluate", { expression: focusExpression, returnByValue: true }, sessionId);
+  outcome.focus = focused.result?.value ?? null;
   for (const spec of keySpecs) {
     const { key, code, vk, text, modifiers } = parseKeySpec(spec);
-    const base = { key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers };
+    // `commands` is Chrome's list of editing commands to run for this key event (`paste`, `selectAll`,
+    // ...). It is the only way CDP can ask the browser "would this keystroke paste?", because CDP cannot put
+    // a File or an image in the OS clipboard, and a KeyboardEvent built in the page produces no default
+    // action at all. The keystroke itself stays real: rawKeyDown through Chrome's input pipeline, with the
+    // command the physical key would have triggered.
+    const base = { key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers, ...(keyCommands.length ? { commands: keyCommands } : {}) };
     await send("Input.dispatchKeyEvent", { type: "rawKeyDown", ...base }, sessionId);
     if (text) await send("Input.dispatchKeyEvent", { type: "char", ...base, text }, sessionId);
     await send("Input.dispatchKeyEvent", { type: "keyUp", ...base }, sessionId);
