@@ -5,6 +5,13 @@ FROM nginx:alpine
 COPY --chmod=0755 docker-entrypoint.nginx.sh /docker-entrypoint.nginx.sh
 COPY nginx.conf.template index.html.template /usr/share/slopyphus/
 
+# The desktop's own stylesheet and script. Every page the entrypoint renders links these two, and they
+# are copied rather than rendered because nothing about them depends on the environment - the only
+# per-page difference is the one rule that splits the viewport, which the entrypoint emits inline. Two
+# files instead of a block in a page because the front renders a page per tab and a desktop must not be
+# able to look different on tab 1 than on tab 4.
+COPY slopyphus-desktop.css slopyphus-desktop.js /usr/share/nginx/html/
+
 # Replacing the image's own entrypoint (which only substitutes whole-environment-variable templates)
 # is the point: the number of upstreams and panes is not a fixed set of variables.
 ENTRYPOINT ["/docker-entrypoint.nginx.sh"]

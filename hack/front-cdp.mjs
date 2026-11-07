@@ -1,8 +1,8 @@
-// A CDP client for the shared headless Chromium (chromium.dev.initialed85.cc), used by the front
-// testbed for the two things the one-shot /render /screenshot /eval routes cannot do:
+// A CDP client for the shared headless Chromium (chromium.dev.initialed85.cc), used by the front testbed
+// for the two things that service's one-shot /render, /screenshot and /eval routes cannot do:
 //
-//   - wait: those routes evaluate too early to see anything a pane builds after load (xterm only exists
-//     once ttyd's websocket opens), and /eval does not await a Promise.
+//   - wait: they evaluate too early to see anything a pane builds after load (xterm only exists once
+//     ttyd's websocket opens), and /eval does not await a Promise.
 //   - drive: evaluate, then look at the result of what the evaluate did. Expanding a pane, scrolling a
 //     pane and then screenshotting it is the only way to check that a CSS change fixed the thing rather
 //     than moved it.

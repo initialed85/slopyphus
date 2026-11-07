@@ -121,16 +121,39 @@ steps:
       - "mkdir -p /tmp/rendered"
       # The rendered file is a server block for conf.d inclusion, so nginx -t needs a wrapper around it.
       - "printf 'events {}\\nhttp {\\n  include %s;\\n}\\n' /tmp/rendered/default.conf > /tmp/nginx.conf"
-      # The desktop this repo ships today: three full height columns on the left, four coder bands on the right.
+      # The desktop this repo ships today: three full height columns on the left, four coder bands on the
+      # right. Seven panes, which is one more than a page is allowed to hold by default, so it is two pages
+      # of 4 and 3 plus the everything-at-once page. The counts are the assertion: a split that filled pages
+      # (6+1) instead of balancing them would show up here as the wrong number of iframes on a page.
       - "COLUMNS='coordinator,tester,deployer' ROWS='coder-1,coder-2,coder-3,coder-4' LAYOUT=columns_left sh ./docker-entrypoint.nginx.sh true"
       - "grep -qF 'location /coordinator/ {' /tmp/rendered/default.conf"
       - "grep -qF 'set $slopyphus_upstream http://coordinator:7681;' /tmp/rendered/default.conf"
       - "grep -qF 'rewrite ^/coder-1/(.*)$ /coder-1/$1 break;' /tmp/rendered/default.conf"
       - "grep -qF 'resolver 127.0.0.1 valid=10s ipv6=off;' /tmp/rendered/default.conf"
+      # The invariant that catches a template/entrypoint drift: every marker in index.html.template must be
+      # substituted, and an unsubstituted one is a page that renders a placeholder as content. A picture a
+      # pane's relay saved is fetched by the client as <base>/images/<name>, which is already inside the
+      # agent's proxied prefix, so the front needs no location of its own for it.
+      - "test $(grep -cF '{{{' /tmp/rendered/index.html) = 0"
       - "grep -qF '#wrap { grid-template-columns: 1fr 1fr; }' /tmp/rendered/index.html"
       - "grep -qF 'group group-columns' /tmp/rendered/index.html"
       - "grep -qF 'group group-rows' /tmp/rendered/index.html"
-      - "test $(grep -c '<iframe' /tmp/rendered/index.html) = 7"
+      # Tabs: a page per group of at most PANES_PER_TAB panes, in declared order, each page a URL.
+      - "test $(grep -c '<iframe' /tmp/rendered/index.html) = 4"
+      - "test $(grep -c '<iframe' /tmp/rendered/tab-2.html) = 3"
+      - "test $(grep -c '<iframe' /tmp/rendered/all.html) = 7"
+      # The tab that lost its columns gets the whole viewport for its rows, which is the same rule a
+      # single-group desktop gets, applied per page rather than per desktop.
+      - "grep -qF '#wrap { grid-template-columns: 1fr; }' /tmp/rendered/tab-2.html"
+      - "test $(grep -cF '<nav id=\"tabs\">' /tmp/rendered/index.html) = 1"
+      - "grep -qF 'aria-current=\"page\">2</a>' /tmp/rendered/tab-2.html"
+      - "grep -qF 'title=\"tab 1 (coordinator tester deployer coder-1)\"' /tmp/rendered/index.html"
+      # Served, not redirected: a `return` builds an absolute URL out of $server_name and $server_port, and
+      # the front testbed measured one sending a browser from a NodePort-style 38137 to port 80.
+      - "grep -qF 'location = /tab-2 {' /tmp/rendered/default.conf"
+      - "grep -qF 'try_files /tab-2.html =404;' /tmp/rendered/default.conf"
+      - "grep -qF 'location = /all {' /tmp/rendered/default.conf"
+      - "nginx -t -c /tmp/nginx.conf"
       # Scrollbars. This is the thing the desktop is judged on: a bar on the desktop itself costs a strip
       # of every pane's width at once, and a bar inside a pane eats part of that pane. Three causes, all
       # measured in the testbed (hack/front-testbed.sh cdp --url ... --expression-file hack/probe-scrollbars.js
@@ -142,13 +165,48 @@ steps:
       #   a bar in every terminal pane, because ttyd's own CSS is `.xterm .xterm-viewport{overflow-y:scroll}`
       #     and the page above cannot style inside an iframe.
       # The greps pin the shipped answers to those three; the behaviour itself is measured in the testbed
-      # rather than asserted here, because there is no browser in this step.
-      - "grep -qF 'display: block;' /tmp/rendered/index.html" # iframe is block, so the 3px baseline goes
-      - "grep -qF 'max-width: calc(100% - 8px);' /tmp/rendered/index.html" # a label stops at its pane
-      - "grep -qF 'text-overflow: ellipsis;' /tmp/rendered/index.html"
-      - "awk '/^      html,/,/^      }/' /tmp/rendered/index.html | grep -q 'overflow: hidden'" # the desktop cannot scroll, so it cannot show a bar
-      - "test $(grep -cF '::-webkit-scrollbar{width:0!important;height:0!important}*{scrollbar-width:none!important}' /tmp/rendered/index.html) = 1" # the rule injected into every pane
-      - "test $(grep -cF 'slopyphus-pane-scrollbars' /tmp/rendered/index.html) = 1" # the style element it is injected as
+      # rather than asserted here, because there is no browser in this step. They grep the desktop's own
+      # stylesheet and script rather than the rendered page, because the front now renders a page per tab
+      # and a rule duplicated into N pages is N chances to fix it on one of them.
+      - "grep -qF 'display: block;' slopyphus-desktop.css" # iframe is block, so the 3px baseline goes
+      - "grep -qF 'max-width: calc(100% - 8px);' slopyphus-desktop.css" # a label stops at its pane
+      - "grep -qF 'text-overflow: ellipsis;' slopyphus-desktop.css"
+      - "awk '/^html,/,/^}/' slopyphus-desktop.css | grep -q 'overflow: hidden'" # the desktop cannot scroll, so it cannot show a bar
+      - "test $(grep -cF '::-webkit-scrollbar{width:0!important;height:0!important}*{scrollbar-width:none!important}' slopyphus-desktop.js) = 1" # the rule injected into every pane
+      - "test $(grep -cF 'slopyphus-pane-scrollbars' slopyphus-desktop.js) = 1" # the style element it is injected as
+      # Every page links both assets, and the names linked are the names the image copies. This pair of
+      # greps exists because the first run of the tabs work rendered a page linking /slopyphus-desktop.css
+      # while the directory held desktop.css: an unstyled skeleton of 300x150 iframes, which measures like a
+      # broken layout rather than like a missing file.
+      - "grep -qF 'COPY slopyphus-desktop.css slopyphus-desktop.js /usr/share/nginx/html/' Dockerfile.nginx"
+      - "grep -qF '<link rel=\"stylesheet\" href=\"/slopyphus-desktop.css\" />' /tmp/rendered/index.html"
+      - "grep -qF '<script src=\"/slopyphus-desktop.js\"></script>' /tmp/rendered/index.html"
+      # A pane's client is compiled into a binary, so a cached desktop page beside it keeps pointing at the
+      # previous rollout's desktop code, which from a browser looks like a fix that never deployed.
+      - "test $(grep -cF 'add_header Cache-Control \"no-store\";' /tmp/rendered/default.conf) -ge 5"
+      - "nginx -t -c /tmp/nginx.conf"
+      # 20 panes at the default 6 per page is four pages of five. Asserted because the alternative - fill
+      # pages and leave a scrap (6,6,6,2) - is four different pane widths on four pages, and because the
+      # limit is the whole point of the feature: no page may show more than PANES_PER_TAB panes.
+      - "COLUMNS='home-ops,pi-ed,pi-team-room,modelcalls,rooter,coral,chromium,ocr,memebrary,camry,djangolang,structmeta,deployed,macgrubernetes,maclet,macker,darwin-vxlan,quake,minecraft-pinger,pinger' ROWS= sh ./docker-entrypoint.nginx.sh true"
+      - "for f in /tmp/rendered/index.html /tmp/rendered/tab-2.html /tmp/rendered/tab-3.html /tmp/rendered/tab-4.html; do test $(grep -c '<iframe' \"$f\") = 5 || { echo \"FAIL: $f is not 5 panes\"; exit 1; }; done"
+      # The limit applies to the pages a person is meant to look at. all.html is the exception on purpose:
+      # it is the everything-at-once view, and the reason it is a page you go to rather than the default.
+      - "for f in /tmp/rendered/index.html /tmp/rendered/tab-*.html; do test $(grep -c '<iframe' \"$f\") -le 6 || { echo \"FAIL: $f shows more than PANES_PER_TAB panes\"; exit 1; }; done"
+      - "test $(grep -c '<iframe' /tmp/rendered/all.html) = 20"
+      - "nginx -t -c /tmp/nginx.conf"
+      # PANES_PER_TAB=0 is the old single-page desktop, and the only remaining way to get 20 panes on one
+      # screen. Asserted against the directory the 20-pane case above just wrote: the entrypoint removes the
+      # tab pages it is no longer rendering, and a stale tab-N.html is a page that still works while showing
+      # panes that are no longer on the desktop.
+      - "COLUMNS='a,b,c,d,e,f,g' PANES_PER_TAB=0 sh ./docker-entrypoint.nginx.sh true"
+      - "test $(grep -c '<iframe' /tmp/rendered/index.html) = 7"
+      - "test $(grep -cF '<nav id=\"tabs\"' /tmp/rendered/index.html) = 0"
+      - "grep -qF 'body { --tabs-h: 0px; }' /tmp/rendered/index.html"
+      - "if [ -e /tmp/rendered/tab-2.html ] || [ -e /tmp/rendered/tab-4.html ] || [ -e /tmp/rendered/all.html ]; then echo 'FAIL: a previous render left tab pages in the html directory'; exit 1; fi"
+      - "echo 'stale tab pages are removed by the render'"
+      - "if PANES_PER_TAB='six' COLUMNS='a' sh ./docker-entrypoint.nginx.sh true 2>/dev/null; then echo 'FAIL: a non-numeric PANES_PER_TAB was accepted'; exit 1; fi"
+      - "echo 'PANES_PER_TAB must be a number or 0'"
       - "nginx -t -c /tmp/nginx.conf"
       # An arbitrary origin, framed through nginx: Host header and base path both come from the URL.
       - "COLUMNS='web=https://www.google.com/maps' ROWS= sh ./docker-entrypoint.nginx.sh true"
@@ -173,6 +231,7 @@ steps:
       - "grep -qF 'rewrite ^/home-ops/(.*)$ /home-ops/$1 break;' /tmp/rendered/default.conf"
       - "grep -qF 'return 308 /home-ops/;' /tmp/rendered/default.conf"
       - "grep -qF '#wrap { grid-template-columns: 1fr; }' /tmp/rendered/index.html"
+      - "grep -qF 'body { --tabs-h: 0px; }' /tmp/rendered/index.html" # one pane, one page, no tab strip
       - "test $(grep -c '<iframe' /tmp/rendered/index.html) = 1"
       - "nginx -t -c /tmp/nginx.conf"
       # Mistakes that used to produce a desktop nobody could bring up, or one that half worked.
@@ -184,6 +243,10 @@ steps:
       - "echo 'duplicated pane name rejected'"
       - "if COLUMNS='healthz' sh ./docker-entrypoint.nginx.sh true 2>/dev/null; then echo 'FAIL: a pane called healthz was accepted'; exit 1; fi"
       - "echo 'reserved pane name rejected'"
+      # The front's own pages are files in the directory an agent's location is a prefix of, so a pane named
+      # after one of them is a proxy location and a static page sharing a path.
+      - "for name in index index.html all all.html tab-1 tab-9 slopyphus-desktop.css report.html; do if COLUMNS=\"$name\" sh ./docker-entrypoint.nginx.sh true 2>/dev/null; then echo \"FAIL: a pane called $name was accepted\"; exit 1; fi; done"
+      - "echo 'the front keeps its own page and asset names'"
 
 when:
   - event: push

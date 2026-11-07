@@ -1,0 +1,182 @@
+/*
+ * The desktop's own stylesheet: served as /slopyphus-desktop.css by the front container and linked by
+ * every page the entrypoint renders (index.html and the tab pages).
+ *
+ * It is a real file rather than a block inside index.html.template because there is now more than one
+ * page, and the one thing that differs between them is how the viewport is split - which is a single
+ * rule the entrypoint emits inline in each page's own <style>. Everything that is the same for every
+ * page lives here, so two pages cannot drift apart in how they treat scrollbars, labels, focus or an
+ * expanded pane.
+ *
+ * The pane half of the scrollbar problem is NOT here: a pane's scrollbars belong to the document inside
+ * the iframe, which this file cannot reach. That is injected from /slopyphus-desktop.js.
+ */
+
+::-webkit-scrollbar {
+  display: none;
+} /* Chrome, Safari, Edge */
+* {
+  scrollbar-width: none;
+} /* Firefox, and Chrome 121+ */
+html,
+body {
+  margin: 0;
+  height: 100%;
+  /* This page is a fixed grid, not a document with content to reach, and there is nothing below it.
+     Clipping is the guarantee that no scrollbar of the desktop's own can ever appear, because one of
+     those costs a strip of width from every pane at once. The two rules that used to make it overflow
+     (an inline iframe, and a label wider than its pane) are fixed below rather than hidden here. */
+  overflow: hidden;
+  background: #111;
+  color: #ccc;
+  font: 12px monospace;
+  /* The height of the tab strip, in the two places that need the number rather than the layout: the
+     expanded pane's top inset, so a full-screen pane does not hide the strip it was reached from. The
+     entrypoint emits it per page (22px where there is a strip, 0px where there is not) because a page
+     with one tab has no strip at all. */
+  --tabs-h: 0px;
+}
+body {
+  /* bar above grid, rather than a height computed from a viewport the bar also consumes: a page with a
+     tab strip and a page without one then share the same rules, and a strip that wraps or grows costs
+     the panes their height rather than overflowing the document. */
+  display: flex;
+  flex-direction: column;
+}
+
+/* The tab strip. Lean on purpose: numbers, the current one marked, and the pane names in the link's
+   title (and in a dim hint at the right) rather than a label per pane. Switching a tab is a link to a
+   static page - no router, no state, no script. What that costs is documented in README.md: the
+   panes on the tab you left disconnect from their terminals, and the keyboard broadcast and the
+   expand shortcut only ever see the panes on the tab you are on. */
+#tabs {
+  flex: 0 0 22px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 4px;
+  background: #181818;
+  border-bottom: 1px solid #333;
+  box-sizing: border-box;
+  /* A strip of links must never be the thing that makes the desktop scroll: overflow is clipped here,
+     and the hint ellipsises, so 20 tabs cannot push the page wider than the viewport. */
+  overflow: hidden;
+  /* Above an expanded pane (z-index 1000), so the way back to another tab is clickable while a pane is
+     covering the viewport. The expanded pane pays for it in --tabs-h of height rather than in reach. */
+  position: relative;
+  z-index: 1001;
+}
+#tabs a {
+  color: #999;
+  text-decoration: none;
+  padding: 1px 8px;
+  border: 1px solid #333;
+  background: #202020;
+  white-space: nowrap;
+}
+#tabs a:hover {
+  color: #fff;
+  border-color: #666;
+}
+#tabs a[aria-current="page"] {
+  color: #111;
+  background: #ccc;
+  border-color: #ccc;
+}
+#tabs .hint {
+  margin-left: auto;
+  color: #555;
+  padding-left: 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+}
+/* The one rule the entrypoint emits per page (grid-template-columns / -rows / 1fr): which half of the
+   viewport each group gets. The inner split of each half is below and needs no pane count, so a group
+   of one or twenty both work. */
+.group {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+}
+/* A "columns" group is equal-width strips spanning the full height of its half; a "rows" group is
+   equal-height bands spanning the full width of its half. auto-flow + auto-tracks mean the split is
+   equal for any number of panes, including one. */
+.group-columns {
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+}
+.group-rows {
+  grid-auto-flow: row;
+  grid-auto-rows: minmax(0, 1fr);
+}
+.cell {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+}
+iframe {
+  /* An iframe is an inline replaced element by default, so it sits on the line's baseline and the line
+     box is the iframe plus the font's descent below it: 3px taller than the viewport at 12px monospace,
+     which is a vertical scrollbar on the desktop. Block level, and it fills the cell. */
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid #fff;
+  box-sizing: border-box;
+}
+/* Which agent is which, without asking every upstream (a proxied ttyd page says "ttyd").
+   pointer-events: none so a label can never steal a click or a keystroke from a terminal. */
+.tag {
+  position: absolute;
+  box-sizing: border-box; /* so the max-width below is the whole label, padding included */
+  top: 2px;
+  left: 4px;
+  padding: 0 3px;
+  background: rgba(17, 17, 17, 0.75);
+  color: #777;
+  pointer-events: none;
+  z-index: 2;
+  /* A label is absolutely positioned inside a cell that is position:relative, so a label wider than its
+     pane is overflow that the cell does not stop: with 20 panes at 40px each, "minecraft-pinger"
+     measured 78px wide and pushed the page to 842px in an 800px viewport, which is a horizontal
+     scrollbar on the desktop and a label printed over its neighbour's terminal. Ellipsis instead. */
+  white-space: nowrap;
+  max-width: calc(100% - 8px); /* the 4px inset on the left, mirrored on the right */
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#wrap iframe.focused {
+  border-color: #00e676;
+}
+body.broadcasting #wrap iframe,
+body.broadcasting #wrap iframe.focused {
+  border-color: #ff3b30;
+}
+body.iframe-expanded {
+  overflow: hidden;
+}
+body.iframe-expanded #wrap > * {
+  visibility: hidden;
+}
+/* The expanded pane is pulled out of its group rather than resized within it, so the grid never
+   re-flows: everything else stays exactly where it was for when the pane is put back. */
+body.iframe-expanded #wrap iframe.expanded {
+  visibility: visible;
+  position: fixed;
+  /* not inset: 0: the tab strip sits above this (z-index 1001) so a pane being looked at cannot hide
+     the tabs, and covering the strip would mean the only way out of the expanded pane is the keyboard
+     chord. The pane starts below the strip, whose height the entrypoint states in --tabs-h. */
+  inset: var(--tabs-h) 0 0 0;
+  z-index: 1000;
+  width: 100vw;
+  height: calc(100vh - var(--tabs-h));
+}

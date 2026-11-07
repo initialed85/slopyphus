@@ -52,6 +52,7 @@ The front renders `nginx.conf` and `index.html` at container start from these va
 | `COLUMNS` | empty | comma separated `name=url` pairs, one full-height column each |
 | `ROWS` | empty | comma separated `name=url` pairs, one full-width band each |
 | `LAYOUT` | `columns_left` | `columns_left` \| `columns_right` \| `rows_top` \| `rows_bottom` |
+| `PANES_PER_TAB` | `6` | panes a page may show before the desktop is split into tab pages; `0` (`off`, `none`, `all`) is one page holding every pane |
 | `AGENT_PORT` | `7681` | the port a bare host is assumed to be a ttyd on |
 | `PAGE_TITLE` | `slopyphus` | browser tab title |
 | `RESOLVER` | auto | DNS server for upstream resolution; `off` to resolve at start instead |
@@ -59,7 +60,8 @@ The front renders `nginx.conf` and `index.html` at container start from these va
 
 At least one of `COLUMNS` / `ROWS` must be set; both may be. `LAYOUT` decides how the viewport is split
 between the two groups, and each group splits its half equally among its panes — one pane or fifty both
-work.
+work. `PANES_PER_TAB` decides how many panes fit on a page before the desktop becomes several pages; see
+[Tabs](#tabs-and-how-to-reach-a-tab-from-a-url).
 
 ```
 columns_left                     rows_top
@@ -206,6 +208,44 @@ Two things that follow from this and are worth knowing before changing it:
 - A pane whose upstream leaves the front's origin - a redirect the proxy follows out to another host - is
   then genuinely a cross-origin document: the style cannot be injected into it and the desktop cannot help
   it. That is the one case where a pane can still show a bar.
+
+## Tabs, and how to reach a tab from a URL
+
+The desktop is a page per group of panes, not one page holding every pane. `PANES_PER_TAB` (default 6) is
+how many panes a page may show before the desktop is split, and the front renders the pages at container
+start: `index.html` is tab 1, `tab-2.html` ... `tab-N.html` are the rest, `all.html` is every pane at
+once. A tab is therefore a URL you can hand to someone — `https://front.dev.initialed85.cc/tab-2.html` —
+and `/tab-2` is a spelling of the same page.
+
+The split is by count, not by geometry, and it is balanced: 20 panes at 6 per tab is 4 pages of 5, not
+6,6,6,2, because four pages with four different pane widths is four desktops and four pages of 5 is one.
+Order is preserved (columns as declared, then rows as declared, cut at the page boundary) and a page keeps
+each pane's group, so a tab holding three columns and three rows is laid out exactly the way `LAYOUT` says
+a 3+3 desktop is, and a tab holding one pane gets the whole viewport. What `PANES_PER_TAB` is really a
+limit on is usable pane width: at an 800px viewport, 5 panes on a page is 160px each — about 19 terminal
+columns, which is readable — while 20 panes on one page is 40px each, which is why `all.html` is a page you
+go to rather than the default.
+
+A tab is a page load, not a view toggled in place, and that is the whole cost of doing it this way: the
+panes on the tab you left disconnect from their terminals (tmux keeps the session and the window, so the
+tab you come back to attaches a new client and re-runs whatever the pane's command prints on attach), and
+the keyboard broadcast (`Alt+Shift+G`) and the expand-one-pane chord (`Alt+Shift+Enter`) only ever see the
+panes on the page you are on. Nothing about a tmux session, its windows, or its scrollback changes.
+
+Every page links two files, `/slopyphus-desktop.css` and `/slopyphus-desktop.js`, which `Dockerfile.nginx`
+copies into the directory nginx serves rather than inlining into a page: with more than one page there is
+nothing in them worth duplicating, and N pages built from one template with the desktop's script inlined
+are N chances for the desktop to behave differently on tab 1 than on tab 4. The one rule that *does* differ
+per page — how the viewport is split between the page's two groups, and the height of the tab strip — is
+emitted inline by the entrypoint, because the expanded-pane rule needs that height as a number rather than
+as a layout. Pages and assets are served `Cache-Control: no-store`: a pane's client is compiled into a
+binary and a page cached beside it keeps pointing at the desktop code of the previous rollout, which from
+inside a browser is indistinguishable from a fix that never deployed.
+
+An agent may not be named `index`, `all`, `tab-<digits>`, anything ending in `.html`, or
+`slopyphus-desktop.css` / `.js`. Those are routes the front owns, and a pane whose name is one of them is a
+proxy location and a static page sharing a path, which is the kind of collision only the person deploying
+it would notice, at the front, sometimes. The entrypoint refuses the name instead.
 
 ## Examples
 
@@ -354,8 +394,10 @@ through the shared Chromium (`chromium.dev.initialed85.cc`) over CDP:
 
 ```sh
 hack/front-testbed.sh up                       # renders the working tree; prints the URL to open
+hack/front-testbed.sh pages                     # what the generator rendered: a line per page, with its pane count
 hack/front-testbed.sh push index.html.template # cp into the running container, no restart (a restart re-renders)
 hack/front-testbed.sh probe hack/probe-scrollbars.js
+hack/front-testbed.sh probe /tmp/tab-probe.js /tab-2.html   # measure one tab page
 hack/front-testbed.sh cdp --url http://<node>:<port>/ --expression-file hack/probe-terminal.js \
   --width 1280 --height 800 --shot /tmp/desktop.png
 hack/front-testbed.sh logs
@@ -377,6 +419,13 @@ attaches a ttyd client to that agent's tmux, and tmux sizes a window to its smal
 the deployed 20-pane desktop from an 800x600 headless tab resizes the terminals of every agent on it. Test
 against `https://example.com` panes carrying the same *names*, which reproduce the narrow-pane layout with
 no agent involved, and only point a pane at a real ttyd when it is your own agent.
+
+The testbed runs the *image's* entrypoint with the working tree's files copied in, which cuts both ways
+about the desktop's own assets: `slopyphus-desktop.css` and `.js` are copied by `Dockerfile.nginx` rather
+than rendered, so a new asset is only served once `sync` copies it, and its name has to match what the
+pages link. Measured, not feared: the first run of the tabs work produced a page whose stylesheet 404'd,
+which renders as unstyled HTML - 300x150 iframes in a wrapping line box - and measures like a broken layout
+rather than like a missing file. `TESTBED_PANES_PER_TAB=<n>` changes how the desktop is split into pages.
 
 The other thing that environment cannot measure: this Chromium renders overlay scrollbars, so a bar reserves
 nothing there (a `::-webkit-scrollbar` forced to 15px reserves nothing, `scrollbar-gutter: stable` reserves

@@ -28,6 +28,21 @@
 #   rows_top | rows_bottom        rows are equal, full-width bands on the named side; columns are
 #                                 equal, half-height strips filling the other half
 #
+# PANES_PER_TAB
+#   How many panes one page may show before the desktop is spread over more pages. Default 6; 0 (or
+#   off/none/all) puts every pane on one page, which is what this front did before tabs existed.
+#   The split is by count, not by geometry: 20 panes at 6 per tab is 4 pages, and the entrypoint
+#   balances them (ceil(20/6)=4 pages, ceil(20/4)=5 panes each) rather than filling pages and leaving
+#   scraps, because a 6,6,6,2 desktop gives four different pane widths and 5,5,5,5 gives one.
+#   Order is preserved: columns as declared, then rows as declared, cut at the page boundaries, and a
+#   page keeps each pane's group - so a tab holding three columns and three rows is laid out exactly the
+#   way LAYOUT says a 3+3 desktop is, and a tab holding one pane gets the whole viewport.
+#   Pages are files, not a router: index.html is the first tab, tab-2.html ... tab-N.html the rest,
+#   all.html every pane at once. /tab-2 redirects to /tab-2.html. A tab is a page load, which means the
+#   panes on the tab you left disconnect from their terminals (tmux keeps the session; the page you arrive
+#   at attaches a new client) and the keyboard broadcast and the expand chord only see the panes on the
+#   page you are on.
+#
 # Other environment
 #   AGENT_PORT   slopyphus/ttyd port, assumed when a bare host is given        (default 7681)
 #   PAGE_TITLE   the browser tab title                                         (default slopyphus)
@@ -63,6 +78,21 @@ HTML_OUT=${HTML_OUT:-/usr/share/nginx/html/index.html}
 AGENT_PORT=${AGENT_PORT:-7681}
 LAYOUT=${LAYOUT:-columns_left}
 PAGE_TITLE=${PAGE_TITLE:-slopyphus}
+
+# 6 is a number chosen for a laptop viewport, not derived from anything: at 800px wide, six columns is
+# 133px per pane, which is about 19 terminal columns - enough to read and narrow enough to be a pane
+# rather than a window. It is also the point where the 20-pane desktop this repo ships stops being 40px
+# strips (measured in the front testbed: "minecraft-pinger" at 78px in a 40px pane pushed the page 42px
+# wider than the viewport).
+PANES_PER_TAB=${PANES_PER_TAB:-6}
+case "$PANES_PER_TAB" in
+  0 | off | none | all) PANES_PER_TAB=0 ;;
+  *[!0-9]*) die "PANES_PER_TAB must be a pane count, or 0 for no tabs (got '$PANES_PER_TAB')" ;;
+esac
+case "$PANES_PER_TAB" in
+  0) ;;
+  1 | 2 | 3 | 4 | 5) ;; # legal, pointless next to a tab strip that costs 22px of height to show one pane
+esac
 
 # See $SVC_SUFFIX's note in parse_spec: this is a Kubernetes convenience, off by default because a
 # compose network resolves bare names without any help.
@@ -105,6 +135,18 @@ validate_name() {
     "") die "agent name is empty" ;;
     . | ..) die "agent name '$1' would collide with a filesystem path in a URL" ;;
     healthz) die "agent name 'healthz' is reserved by the front's own probe route" ;;
+    # The front's own pages are files in the same directory an agent's location is a prefix of, and the
+    # tab pages are named by number. A pane called index, all or tab-1 would be a name that is also a
+    # route, which is the kind of collision only the person deploying it would notice, and only at the
+    # front, and only sometimes.
+    index | index.html | all | all.html) die "agent name '$1' is a page the front renders itself" ;;
+    tab-[0-9]*) die "agent name '$1' collides with the front's tab pages (/tab-N.html)" ;;
+    # Not a scheme check: a pane name is used as a URL prefix, and one ending in .html would be a pane
+    # that looks like a page and is served by a location instead of by the file server.
+    *.html) die "agent name '$1' ends in .html, which is what the front's own pages are" ;;
+    slopyphus-desktop | slopyphus-desktop.css | slopyphus-desktop.js)
+      die "agent name '$1' collides with the stylesheet and script every page links"
+      ;;
     *[!A-Za-z0-9._-]*) die "invalid agent name '$1': use letters, digits, dot, dash or underscore" ;;
   esac
 }
@@ -305,23 +347,38 @@ render_group() {
   printf '      </div>\n'
 }
 
-# Which half of the viewport each group gets. The inner split of each half (equal strips or equal
-# bands) is fixed in the template's CSS and needs no count, so a group of one or fifty both work.
+# Which half of the viewport each group gets, for one page's two tables. The inner split of each half
+# (equal strips or equal bands) is in the shared stylesheet and needs no count, so a group of one or
+# fifty both work.
 render_groups() {
+  _cols=${1:-}
+  _rows=${2:-}
   case "$LAYOUT" in
     columns_left | rows_bottom)
-      render_group "$tmp/columns.tsv" columns
-      render_group "$tmp/rows.tsv" rows
+      render_group "$_cols" columns
+      render_group "$_rows" rows
       ;;
     columns_right | rows_top)
-      render_group "$tmp/rows.tsv" rows
-      render_group "$tmp/columns.tsv" columns
+      render_group "$_rows" rows
+      render_group "$_cols" columns
       ;;
   esac
 }
 
+# The per-page CSS. Two things, both of which depend on this page and on nothing else: how the viewport
+# is shared between the page's two groups (a single group takes all of it), and how tall the tab strip
+# is, which the shared stylesheet needs as a number because an expanded pane starts below the strip
+# rather than under it. 0px on a page with no strip, so the same rule is right on both kinds of page.
 render_grid_css() {
-  if [ -s "$tmp/columns.tsv" ] && [ -s "$tmp/rows.tsv" ]; then
+  _cols=${1:-}
+  _rows=${2:-}
+  _tabs=${3:-0}
+  if [ "$_tabs" -gt 1 ] 2>/dev/null; then
+    printf '      body { --tabs-h: 22px; }\n'
+  else
+    printf '      body { --tabs-h: 0px; }\n'
+  fi
+  if [ -s "$_cols" ] && [ -s "$_rows" ]; then
     case "$LAYOUT" in
       columns_left | columns_right) printf '      #wrap { grid-template-columns: 1fr 1fr; }\n' ;;
       *) printf '      #wrap { grid-template-rows: 1fr 1fr; }\n' ;;
@@ -331,26 +388,136 @@ render_grid_css() {
   fi
 }
 
+# The tab strip: a link per page and the panes that live on each one, in the link's title and in a dim
+# hint on this page. Numbers rather than names because the strip shares its width with every other tab,
+# and 20 panes is 4 tabs at 800px, which is not room for names. aria-current on the page you are on so
+# the marked tab is a fact the browser knows rather than a class this script sets.
+render_tab_nav() {
+  _tabs=${1:-1}
+  _self=${2:-1}
+  _label=${3:-}
+  shift 3
+  [ "$_tabs" -gt 1 ] 2>/dev/null || return 0
+  printf '    <nav id="tabs">\n'
+  _k=1
+  while [ "$_k" -le "$_tabs" ]; do
+    _href=/
+    _name="tab $_k"
+    if [ "$_k" -gt 1 ]; then _href="/tab-$_k.html"; fi
+    _hint=$(trim "$(agent_names "$tmp/tab-$_k.columns.tsv" "$tmp/tab-$_k.rows.tsv" | tr '\n' ' ')")
+    if [ "$_k" = "$_self" ]; then
+      printf '      <a href="%s" title="%s (%s)" aria-current="page">%d</a>\n' "$_href" "$_name" "$_hint" "$_k"
+    else
+      printf '      <a href="%s" title="%s (%s)">%d</a>\n' "$_href" "$_name" "$_hint" "$_k"
+    fi
+    _k=$((_k + 1))
+  done
+  if [ -n "$_label" ]; then
+    if [ "$_self" = 0 ]; then
+      printf '      <a href="/all.html" title="every pane on one page" aria-current="page">all</a>\n'
+    else
+      printf '      <a href="/all.html" title="every pane on one page">all</a>\n'
+    fi
+  fi
+  _here=$(agent_names "$@" | tr '\n' ' ')
+  printf '      <span class="hint">%s</span>\n' "$(trim "$_here")"
+  printf '    </nav>\n'
+}
+
+# Routes the front owns for itself: the short spellings of its own pages, and no-store on the page and
+# the two assets every page links. The second one is not tidiness - a pane's client is embedded in a
+# binary and a rollout changes it, and a desktop page cached beside it keeps referencing the stylesheet
+# and script of the rollout before, which from the browser looks exactly like a fix that did not deploy.
+#
+# Served, not redirected. `return 308 /tab-3.html` would build an absolute URL from $server_name and
+# $server_port, which on a NodePort or any front reached on a port other than the one it listens on sends
+# the browser to the wrong host - measured in the front testbed, where /tab-3 on port 38137 answered
+# http://192.168.1.213/tab-3.html. try_files picks the file up from the server's own root and says nothing
+# about where the front is.
+render_page_locations() {
+  _tabs=${1:-1}
+  _k=1
+  while [ "$_k" -le "$_tabs" ]; do
+    if [ "$_k" = 1 ]; then
+      printf '  location = /tab-1 {\n    add_header Cache-Control "no-store";\n    try_files /index.html =404;\n  }\n\n'
+    else
+      printf '  location = /tab-%d {\n    add_header Cache-Control "no-store";\n    try_files /tab-%d.html =404;\n  }\n\n' "$_k" "$_k"
+    fi
+    _k=$((_k + 1))
+  done
+  if [ "$_tabs" -gt 1 ] 2>/dev/null; then
+    printf '  location = /all {\n    add_header Cache-Control "no-store";\n    try_files /all.html =404;\n  }\n\n'
+  fi
+  printf '  location ~ ^/(index|all|tab-[0-9]+)\\.html$ {\n    add_header Cache-Control "no-store";\n  }\n\n'
+  printf '  location = /slopyphus-desktop.css {\n    add_header Cache-Control "no-store";\n  }\n\n'
+  printf '  location = /slopyphus-desktop.js {\n    add_header Cache-Control "no-store";\n  }\n\n'
+}
+
+# The plan: every pane of the desktop in one ordered table, tagged with the group it was declared in,
+# which is what lets a page rebuild its own two tables and hand them to the renderers unchanged. Columns
+# first, then rows, each in the order declared - the same order the single-page desktop laid panes out in,
+# so a desktop that fits on one page renders identically with tabs switched on.
+build_plan() {
+  : >"$tmp/plan.tsv"
+  tag_table columns "$tmp/columns.tsv" >>"$tmp/plan.tsv"
+  tag_table rows "$tmp/rows.tsv" >>"$tmp/plan.tsv"
+}
+
+tag_table() {
+  _group=$1
+  _in=$2
+  [ -s "$_in" ] || return 0
+  awk -v g="$_group" 'NF { print g "\037" $0 }' "$_in"
+}
+
+# Cut the plan into pages of at most PANES_PER_TAB panes, balanced so the pages are as equal as the
+# count allows, and write each page's two tables in the format the renderers already read. 0 panes per
+# tab means no tabs: one page holding everything.
+split_tabs() {
+  _total=${1:-0}
+  _tabs=${2:-1}
+  _size=${3:-0}
+  _k=1
+  while [ "$_k" -le "$_tabs" ]; do
+    : >"$tmp/tab-$_k.columns.tsv"
+    : >"$tmp/tab-$_k.rows.tsv"
+    _k=$((_k + 1))
+  done
+  [ "$_total" -gt 0 ] || return 0
+  _i=0
+  while IFS=$US read -r _group _kind _name _upstream _path _host; do
+    _i=$((_i + 1))
+    _k=$(( (_i - 1) / _size + 1 ))
+    printf '%s\037%s\037%s\037%s\037%s\n' "$_kind" "$_name" "$_upstream" "$_path" "$_host" >>"$tmp/tab-$_k.$_group.tsv"
+  done <"$tmp/plan.tsv"
+}
+
 # Replace @@MARKER@@ lines with the contents of a file. Inserted text is copied literally: no shell
-# quoting, no regex, so an upstream URL containing / & or \ cannot corrupt the output.
+# quoting, no regex, so an upstream URL containing / & or \ cannot corrupt the output. The title is the
+# one mid-line substitution, because it belongs in a title element rather than on a line of its own.
 render() {
   _tpl=${1:-}
   _out=${2:-}
+  _title=${3:-$PAGE_TITLE}
+  _nav=${4:-}
   [ -f "$_tpl" ] || die "missing template $_tpl"
 
   awk \
     -v LOCATIONS="$tmp/locations.frag" \
     -v GROUPS="$tmp/groups.frag" \
     -v GRIDCSS="$tmp/gridcss.frag" \
+    -v NAV="$_nav" \
     -v RESOLVER="$tmp/resolver.frag" \
-    -v TITLE="$PAGE_TITLE" '
+    -v TITLE="$_title" '
     function emit(file,  line) {
+      if (file == "") return
       while ((getline line < file) > 0) print line
       close(file)
     }
     /@@AGENT_LOCATIONS@@/ { emit(LOCATIONS); next }
     /@@GROUPS@@/ { emit(GROUPS); next }
     /@@GRID_CSS@@/ { emit(GRIDCSS); next }
+    /@@TAB_NAV@@/ { emit(NAV); next }
     /@@RESOLVER@@/ { emit(RESOLVER); next }
     /@@PAGE_TITLE@@/ {
       # mid-line insertion, kept literal (a title may legitimately contain & or regex characters)
@@ -381,8 +548,67 @@ fi
 
 render_locations "$tmp/columns.tsv" >"$tmp/locations.frag"
 render_locations "$tmp/rows.tsv" >>"$tmp/locations.frag"
-render_groups >"$tmp/groups.frag"
-render_grid_css >"$tmp/gridcss.frag"
+
+# One ordered table of every pane, then the pages it is cut into. An agent gets exactly one nginx
+# location however many pages could show it, so locations come from the original tables and the pages
+# contribute only their own routes.
+build_plan
+page_total=$(agent_names "$tmp/columns.tsv" "$tmp/rows.tsv" | grep -c .)
+if [ "$PANES_PER_TAB" = 0 ] || [ "$page_total" -le "$PANES_PER_TAB" ]; then
+  page_tabs=1
+  page_size=$page_total
+else
+  page_tabs=$(( (page_total + PANES_PER_TAB - 1) / PANES_PER_TAB ))
+  page_size=$(( (page_total + page_tabs - 1) / page_tabs ))
+fi
+split_tabs "$page_total" "$page_tabs" "$page_size"
+render_page_locations "$page_tabs" >>"$tmp/locations.frag"
+
+# Where the extra pages go: beside the page the entrypoint was told to write, which keeps a configured
+# HTML_OUT of any path working rather than assuming /usr/share/nginx/html.
+HTML_DIR=${HTML_OUT%/*}
+if [ "$HTML_DIR" = "$HTML_OUT" ]; then HTML_DIR=.; fi
+if [ -z "$HTML_DIR" ]; then HTML_DIR=/; fi
+
+# Render is not additive. A front that goes from 20 panes to 3 leaves tab-4.html and all.html sitting in
+# the served directory, and a stale page is one that still works: it would show panes that are no longer on
+# the desktop, framing locations that no longer exist. The front owns those names - validate_name refuses an
+# agent that would collide with them - so it clears them before writing the set this render asked for.
+rm -f "$HTML_DIR"/tab-*.html "$HTML_DIR/all.html" 2>/dev/null || true
+
+# One page per tab, from one template. Tab 1 is index.html so the front's existing URL (/) keeps being
+# the desktop, and the tabs after it are files a browser can be pointed at directly.
+#
+# The loop's own variables are named _page_* rather than the _k / _out the renderers use internally,
+# because this script is written for busybox ash and calls no function-local variables: a renderer's _k
+# is the same _k the caller is looping on. Left as _k, render_tab_nav's own tab loop finishes by setting
+# _k past the end of the caller's, and the silent result is a desktop that renders tab 1, skips every
+# other tab, and still prints a summary claiming it made them all.
+_page=1
+while [ "$_page" -le "$page_tabs" ]; do
+  if [ "$_page" -gt 1 ]; then
+    _page_title="$PAGE_TITLE - tab $_page"
+    _page_out="$HTML_DIR/tab-$_page.html"
+  else
+    _page_title=$PAGE_TITLE
+    _page_out=$HTML_OUT
+  fi
+  render_groups "$tmp/tab-$_page.columns.tsv" "$tmp/tab-$_page.rows.tsv" >"$tmp/groups.frag"
+  render_grid_css "$tmp/tab-$_page.columns.tsv" "$tmp/tab-$_page.rows.tsv" "$page_tabs" >"$tmp/gridcss.frag"
+  render_tab_nav "$page_tabs" "$_page" "$([ "$page_tabs" -gt 1 ] && echo all)" \
+    "$tmp/tab-$_page.columns.tsv" "$tmp/tab-$_page.rows.tsv" >"$tmp/nav.frag"
+  render "$TEMPLATE_DIR/index.html.template" "$_page_out" "$_page_title" "$tmp/nav.frag"
+  _page=$((_page + 1))
+done
+
+# The escape hatch, and the only page that shows everything at once: worth having when tabs exist, and
+# worth not having when they do not, because a one-page desktop would be rendering the same page twice.
+if [ "$page_tabs" -gt 1 ] 2>/dev/null; then
+  render_groups "$tmp/columns.tsv" "$tmp/rows.tsv" >"$tmp/groups.frag"
+  render_grid_css "$tmp/columns.tsv" "$tmp/rows.tsv" "$page_tabs" >"$tmp/gridcss.frag"
+  render_tab_nav "$page_tabs" 0 all "$tmp/columns.tsv" "$tmp/rows.tsv" >"$tmp/nav.frag"
+  render "$TEMPLATE_DIR/index.html.template" "$HTML_DIR/all.html" "$PAGE_TITLE - all" "$tmp/nav.frag"
+fi
 
 if [ "$DYNAMIC" = 1 ]; then
   printf '  resolver %s valid=10s ipv6=off;\n' "$RESOLVER" >"$tmp/resolver.frag"
@@ -395,11 +621,15 @@ else
 fi
 
 render "$TEMPLATE_DIR/nginx.conf.template" "$CONF_OUT"
-render "$TEMPLATE_DIR/index.html.template" "$HTML_OUT"
 
-printf '%s: layout=%s\n' "$PROG" "$LAYOUT"
+printf '%s: layout=%s panes_per_tab=%s pages=%s\n' "$PROG" "$LAYOUT" "$PANES_PER_TAB" "$page_tabs"
 printf '  columns: %s\n' "$(agent_names "$tmp/columns.tsv" | tr '\n' ' ')"
 printf '  rows:    %s\n' "$(agent_names "$tmp/rows.tsv" | tr '\n' ' ')"
+_page=1
+while [ "$_page" -le "$page_tabs" ]; do
+  printf '  tab %d:   %s\n' "$_page" "$(trim "$(agent_names "$tmp/tab-$_page.columns.tsv" "$tmp/tab-$_page.rows.tsv" | tr '\n' ' ')")"
+  _page=$((_page + 1))
+done
 if [ "$DYNAMIC" = 1 ]; then
   printf '  upstreams resolved per request via %s\n' "$RESOLVER"
 else

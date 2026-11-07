@@ -72,7 +72,21 @@ The UI is generated at container start, not committed: `docker-entrypoint.nginx.
 There is no committed `nginx.conf` or `index.html` any more, and the rendered copies inside a running
 container are output, not source- edit the template or the environment, never the rendered file.
 
-- The renderer is `/bin/sh` on busybox ash (`nginx:alpine` has no bash): no arrays, no `[[ ]]`, no `$''`.
+- The renderer is `/bin/sh` on busybox ash (`nginx:alpine` has no bash): no arrays, no `[[ ]]`, no `$''`,
+  and no `local` - every function's `_`-prefixed variables are global to the script. The main flow's own
+  loop variables are named `_page*` because the renderers reuse `_k`, `_name` and `_tabs` internally: a
+  `_k` in the main flow is clobbered by `render_tab_nav`'s own tab loop, and the failure is silent - tab 1
+  renders, no other page is written, and the summary still prints every tab.
+- A desktop is a page per group of panes. `PANES_PER_TAB` (default 6) decides when it splits, and the
+  entrypoint renders `index.html` (tab 1), `tab-2.html` ... `tab-N.html`, plus `all.html` (every pane at
+  once). Every page links `/slopyphus-desktop.css` and `/slopyphus-desktop.js`, which `Dockerfile.nginx`
+  copies into the directory nginx serves; the only per-page CSS is the rule that splits the viewport and
+  states the tab strip's height, which `render_grid_css` emits inline. So a change to how the desktop
+  *looks* is usually those two files plus `index.html.template`, and a change to how panes are *grouped* is
+  `render_groups` / `render_grid_css` / `split_tabs`.
+- An agent name may not be `index`, `all`, `tab-<digits>`, anything ending in `.html`, or the two asset
+  names: those are routes the front owns, and `validate_name` refuses them rather than letting a proxy
+  location and a static page share a path.
 - Change which agents are on the desktop with environment variables (compose `UI_*`, or a Deployment's env).
   Do not add a per-agent block to a template; the templates must not know any agent's name.
 - `.woodpecker/ci.yaml` asserts what the renderer emits. If you change the renderer's output, change the

@@ -242,5 +242,9 @@ services:
       - COLUMNS=${UI_COLUMNS:-coordinator,tester,deployer}
       - ROWS=${UI_ROWS:-coder-1,coder-2,coder-3,coder-4}
       - LAYOUT=${UI_LAYOUT:-columns_left}
+      # Tabs are on by default (6 panes per page), so the 7 panes above render as two pages: / with 4
+      # and /tab-2.html with 3, plus /all.html showing all 7. Set UI_PANES_PER_TAB=0 for the single-page
+      # desktop, or a larger number to raise the limit.
+      - PANES_PER_TAB=${UI_PANES_PER_TAB:-6}
       - PAGE_TITLE=${UI_PAGE_TITLE:-slopyphus}
 

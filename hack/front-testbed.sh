@@ -29,7 +29,7 @@
 # the same *names* pointing at https://example.com, and only point a pane at a real ttyd when it is your
 # own agent.
 #
-# Usage: hack/front-testbed.sh [up|sync|down|logs|conf|html|push <file> [name]|probe <expr-file> [path]|cdp <front-cdp args>|shot [out.png]]
+# Usage: hack/front-testbed.sh [up|sync|down|logs|conf|html|pages|push <file> [name]|probe <expr-file> [path]|cdp <front-cdp args>|shot [out.png]]
 #
 # Written for /bin/sh (this pod has bash, the front's container has busybox ash, keep it plain).
 
@@ -65,6 +65,9 @@ TESTBED_COLUMNS=${TESTBED_COLUMNS:-google=https://www.google.com,bing=https://ww
 TESTBED_ROWS=${TESTBED_ROWS:-}
 TESTBED_LAYOUT=${TESTBED_LAYOUT:-columns_left}
 TESTBED_PAGE_TITLE=${TESTBED_PAGE_TITLE:-front-test}
+# The knob the tab work is measured with: how many panes one page may hold. Empty means "the container's
+# default" (6) so an unrelated testbed run does not silently change shape.
+TESTBED_PANES_PER_TAB=${TESTBED_PANES_PER_TAB:-}
 # Left at the container's own defaults (resolver auto-detected from its /etc/resolv.conf, no Service-name
 # suffixing) because the default pane set names no bare hosts. For a bare Kubernetes Service name, nginx's
 # resolver does not expand search domains, so the in-cluster front sets SVC_SUFFIX=<ns>.svc.cluster.local
@@ -91,6 +94,7 @@ up() {
     -p "0.0.0.0:$TESTBED_PORT:80/tcp" \
     -e COLUMNS="$TESTBED_COLUMNS" -e ROWS="$TESTBED_ROWS" -e LAYOUT="$TESTBED_LAYOUT" \
     -e PAGE_TITLE="$TESTBED_PAGE_TITLE" -e SVC_SUFFIX="$TESTBED_SVC_SUFFIX" -e RESOLVER="$TESTBED_RESOLVER" \
+    ${TESTBED_PANES_PER_TAB:+-e PANES_PER_TAB="$TESTBED_PANES_PER_TAB"} \
     "$TESTBED_IMAGE" >/dev/null
   # The container's /usr/share/slopyphus is the checked-in templates baked into the image; sync() is
   # what replaces them with the working tree. Do it now so "up" alone already tests these files.
@@ -105,6 +109,14 @@ sync_only() {
   docker_cmd cp "$ROOT/docker-entrypoint.nginx.sh" "$TESTBED_NAME:/docker-entrypoint.nginx.sh"
   docker_cmd cp "$ROOT/nginx.conf.template" "$TESTBED_NAME:/usr/share/slopyphus/nginx.conf.template"
   docker_cmd cp "$ROOT/index.html.template" "$TESTBED_NAME:/usr/share/slopyphus/index.html.template"
+  # slopyphus-desktop.css and slopyphus-desktop.js are not templates - Dockerfile.nginx copies them into
+  # the directory nginx serves - but they are the files a layout change is most likely to touch, so they
+  # sync to the served directory as well. The names have to match what the pages link: a page that links
+  # /slopyphus-desktop.css while the directory holds desktop.css serves an unstyled HTML skeleton - 300x150
+  # iframes in a wrapping line box, a nav that is just text - which measures like a broken layout rather
+  # than like a missing file. Measured, not feared: it is what the first run of this tabs work produced.
+  docker_cmd cp "$ROOT/slopyphus-desktop.css" "$TESTBED_NAME:/usr/share/nginx/html/slopyphus-desktop.css"
+  docker_cmd cp "$ROOT/slopyphus-desktop.js" "$TESTBED_NAME:/usr/share/nginx/html/slopyphus-desktop.js"
   # docker cp preserves the source file's mode, and a git checkout of this repo has the entrypoint 0644
   # (Dockerfile.nginx fixes that with COPY --chmod=0755). Without this the restart dies with
   # `exec: "/docker-entrypoint.nginx.sh": permission denied`.
@@ -133,6 +145,12 @@ case "$cmd" in
     ;;
   html)
     docker_cmd exec "$TESTBED_NAME" cat /usr/share/nginx/html/index.html
+    ;;
+  # pages: what the generator actually produced, which is the first question tabs raise. One line per
+  # page with its pane count, because "the desktop fits on one page" and "it did not" look identical from
+  # a screenshot of index.html alone.
+  pages)
+    docker_cmd exec "$TESTBED_NAME" sh -c 'cd /usr/share/nginx/html && for f in *.html; do printf "%-14s %2d iframes  nav=%s\n" "$f" "$(grep -c "<iframe" "$f")" "$(grep -c "nav id" "$f")"; done'
     ;;
   # push: put a file in the running container's html directory, no restart (default target index.html,
   # i.e. a scratch copy of the rendered desktop; pass a name for a scratch page like scrollbox.html).
