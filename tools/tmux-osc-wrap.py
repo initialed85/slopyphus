@@ -62,8 +62,17 @@ It can also name the pictures it passes. `--anchor` writes each image under the 
 prints a dim line of text - `[[img:<10 hex>.<ext>:<rows>]]` - on the row below the space it reserved. That line is
 the point: tmux's grid holds cells and stores no copy of an inline image, so every repaint (a wheel scroll, a pane
 resize, a pane menu, a client reattach) erases a picture that was only ever a burst of bytes, while a line of text
-survives all of them. The browser side is what turns the line back into the picture; until it exists the flag stays
-off, because an anchor nobody understands is just text in someone's transcript.
+survives all of them. The browser side - ttyd's client addon - turns the line back into the picture.
+
+Anchoring replaces the burst rather than adding to it: with `--anchor` the image bytes are not sent to the terminal
+at all, because a picture drawn twice by two renderers with separate ideas of where it is drawn worse than badly.
+Measured on a live pane (slopyphus, 07/11), an anchored picture sent as bytes as well sat in the wrong place after
+a pane split - below the tmux status bar, over another pane's prompt - because the byte-driven renderer keeps its
+images attached to its own buffer lines and tmux's reprint moves those lines out from under it, while the anchor is
+grid text and redraws where the grid says it belongs. `--inline` (or `OSC_WRAP_INLINE=on`) sends both, which is
+what a terminal that cannot read an anchor needs - ssh into a pane in iTerm2 and the anchor is just text.
+An image whose bytes are needed but whose size could not be read falls back to sending them too: a picture with no
+anchor is a downgrade, and a picture that was swallowed is not.
 """
 
 import base64
@@ -105,6 +114,10 @@ RESERVE = os.environ.get("OSC_WRAP_RESERVE", "on").lower() not in ("off", "0", "
 # naming, because an anchor nothing understands is just a line of text in someone's transcript. Saving and
 # anchoring are one switch on purpose - a file with no anchor is a picture nothing will ever ask for.
 ANCHOR = os.environ.get("OSC_WRAP_ANCHOR", "off").lower() not in ("off", "0", "no")
+# Whether the picture is also sent as bytes. Three states on purpose: unset means "whatever anchoring implies",
+# which is no bytes when an anchor is being written and bytes when it is not; set means exactly what the operator
+# said. See the module docstring for the measured reason two renderers are worse than one.
+INLINE = None if "OSC_WRAP_INLINE" not in os.environ else os.environ["OSC_WRAP_INLINE"].lower() not in ("off", "0", "no")
 # Relative to the relay's working directory, which is the pane's: ttyd starts the pane with -w /workspace/$NAME
 # and the relay inherits that, so this lands beside the directory a browser paste writes into. Same place, same
 # meaning: pictures belonging to this pane.
@@ -136,11 +149,14 @@ def terminator(buf: bytearray, start: int) -> int:
 class Rewriter:
     """Streaming wrapper. feed() returns the bytes that are safe to send to the terminal now."""
 
-    def __init__(self, enable=True, reserve=RESERVE, anchor=ANCHOR, term_size=(80, 24)):
+    def __init__(self, enable=True, reserve=RESERVE, anchor=ANCHOR, inline=INLINE, term_size=(80, 24)):
         self.buf = bytearray()
         self.enable = enable
         self.reserve = reserve
         self.anchor = anchor
+        # Resolved rather than defaulted twice: an anchor with the burst still running is the double draw that was
+        # measured floating over the wrong pane.
+        self.inline = (not anchor) if inline is None else inline
         self.term_size = term_size
         self.stats = {"images": 0, "rows": 0, "anchors": 0}
 
@@ -181,25 +197,36 @@ class Rewriter:
                 break  # wait for more of the payload
             payload = bytes(b[:end])
             del b[:end]
-            out += wrap(payload) if self.enable else payload
-            if self.reserve:
-                cols, rows = self.term_size
-                n = reserve_rows(payload, cols, rows)
-                if n:
+            wrapped = wrap(payload) if self.enable else payload
+            cols, rows = self.term_size
+            n = reserve_rows(payload, cols, rows) if self.reserve else 0
+            anchored = False
+            if self.anchor and n:
+                # An anchor is only worth printing when the room the picture needs is also known. An anchor the
+                # browser cannot size is a picture drawn over somebody's text.
+                raw, kind = decode_image(payload)
+                name = save_image(raw, kind) if raw else ""
+                if name:
+                    if self.inline:
+                        out += wrapped
                     # Deliberately outside the wrapper. A newline tmux parses is a newline the pane's own grid
                     # keeps, which is what keeps the rows under a picture consistent when the pane redraws;
                     # inside the wrapper they would reach only whoever is looking.
                     out += reserve_newlines(n)
+                    out += anchor_line(name, n)
                     self.stats["images"] += 1
                     self.stats["rows"] += n
-                    if self.anchor:
-                        # An anchor is only worth printing when the room the picture needs is also known. An
-                        # anchor the browser cannot size is a picture drawn over somebody's text.
-                        raw, kind = decode_image(payload)
-                        name = save_image(raw, kind) if raw else ""
-                        if name:
-                            out += anchor_line(name, n)
-                            self.stats["anchors"] += 1
+                    self.stats["anchors"] += 1
+                    anchored = True
+            if not anchored:
+                # Nothing on the far side has been told a picture belongs here, so the bytes are the picture and
+                # passing them is the only way anybody sees it. This is also where an image whose size could not be
+                # read lands, which makes a failed anchor a downgrade instead of a disappearance.
+                out += wrapped
+                if n:
+                    out += reserve_newlines(n)
+                    self.stats["images"] += 1
+                    self.stats["rows"] += n
         return bytes(out)
 
     def idle(self) -> bytes:
@@ -462,7 +489,9 @@ def main():
     force = None
     reserve = RESERVE
     anchor = ANCHOR
-    while argv and argv[0] in ("--force", "--no-force", "--no-reserve", "--anchor", "--no-anchor"):
+    inline = INLINE
+    flags = ("--force", "--no-force", "--no-reserve", "--anchor", "--no-anchor", "--inline", "--no-inline")
+    while argv and argv[0] in flags:
         arg = argv.pop(0)
         if arg == "--no-reserve":
             reserve = False
@@ -470,17 +499,24 @@ def main():
             anchor = True
         elif arg == "--no-anchor":
             anchor = False
+        elif arg == "--inline":
+            inline = True
+        elif arg == "--no-inline":
+            inline = False
         else:
             force = arg == "--force"
     if not argv or argv[0] in ("-h", "--help"):
         sys.stderr.write(
-            "usage: tmux-osc-wrap.py [--force|--no-force] [--no-reserve] [--anchor|--no-anchor] command [args...]\n"
+            "usage: tmux-osc-wrap.py [--force|--no-force] [--no-reserve] [--anchor|--no-anchor]"
+            " [--inline|--no-inline] command [args...]\n"
             "Wraps OSC 1337 image sequences in tmux's passthrough DCS. Enabled only when $TMUX is set unless\n"
             "--force is given, because in a pane without tmux the wrapper is a sequence the outer terminal has\n"
             "no reason to understand. After an image it prints blank rows for the rows the picture covers,\n"
             "because xterm.js does not move the cursor for an inline image; --no-reserve turns that off.\n"
-            "--anchor additionally saves each picture under the pane's working directory and prints the text line\n"
-            "that records where it belongs; off until the browser side reads those lines.\n"
+            "--anchor saves each picture under the pane's working directory and prints the text line that records\n"
+            "where it belongs, and stops sending the image bytes, because the line is what survives a tmux repaint\n"
+            "and a picture drawn from both is drawn by whoever guessed the position last. --inline sends the bytes\n"
+            "as well, for a terminal that cannot read an anchor; --no-anchor restores the plain byte stream.\n"
         )
         sys.exit(0 if argv and argv[0] == "--help" else 2)
 
@@ -545,7 +581,7 @@ def main():
         signal.signal(sig, forward)
     signal.signal(signal.SIGWINCH, winch)
 
-    rw = Rewriter(enable, reserve=reserve, anchor=anchor, term_size=pane_size())
+    rw = Rewriter(enable, reserve=reserve, anchor=anchor, inline=inline, term_size=pane_size())
     closed = False
     while True:
         if state["winch"]:

@@ -38,7 +38,7 @@ set -eu
 
 IMAGE=${1:-slopyphus-terminal-test:local}
 if [ $# -ge 1 ]; then shift; fi
-CASES=${*:-"anchor-emit anchor-text-only"}
+CASES=${*:-"anchor-emit anchor-text-only anchor-scroll anchor-split"}
 
 DOCKER_HOST=${DOCKER_HOST:-tcp://192.168.1.213:2375}
 export DOCKER_HOST
@@ -102,6 +102,21 @@ start_container() {
 write_cases() {
   cat >"$WORK/case-anchor-emit.sh" <<EOS
 echo "CASE-SIZE \$(tput cols 2>/dev/null || echo ??)x\$(tput lines 2>/dev/null || echo ??)" > /tmp/case-size.txt
+echo CASE-BEFORE-MARKER
+echo '$SEQ_B64' | base64 -d > /tmp/pi-seq.bin
+echo '$SHIM_B64' | base64 -d > /tmp/osc-wrap.py
+python3 /tmp/osc-wrap.py --anchor sh -c 'cat /tmp/pi-seq.bin; echo CASE-AFTER-MARKER'
+echo CASE-RAN-MARKER
+EOS
+
+  # The gesture a person actually reports. A mouse wheel in a tmux pane is not the browser scrolling its own
+  # terminal: tmux answers WheelUpPane with copy-mode, reprinting a slice of the pane's history over the grid, and
+  # prints the live pane again when the gesture ends. The filler lines exist so there is a history slice to
+  # reprint - without them the two views are the same grid and the case measures nothing.
+  cat >"$WORK/case-anchor-scroll.sh" <<EOS
+echo "CASE-SIZE \$(tput cols 2>/dev/null || echo ??)x\$(tput lines 2>/dev/null || echo ??)" > /tmp/case-size.txt
+i=1
+while [ \$i -le 14 ]; do echo "FILLER-LINE-\$i"; i=\$((i + 1)); done
 echo CASE-BEFORE-MARKER
 echo '$SEQ_B64' | base64 -d > /tmp/pi-seq.bin
 echo '$SHIM_B64' | base64 -d > /tmp/osc-wrap.py
@@ -189,6 +204,21 @@ write_dom() {
       }
     }
   }
+  // What the addon's per-render scan costs in this browser, measured the way the addon does it: every row of the
+  // viewport translated to a string. That is the whole price of not caching the scan's answer, and the answer is
+  // the thing that has been wrong three times in this feature.
+  let scanCost = null;
+  {
+    const passes = 50;
+    const started = performance.now();
+    for (let p = 0; p < passes; p++) {
+      for (let y = buffer.viewportY; y < buffer.viewportY + term.rows; y++) {
+        const line = buffer.getLine(y);
+        if (line) line.translateToString(true);
+      }
+    }
+    scanCost = { passes, rows: term.rows, ms: +(performance.now() - started).toFixed(2) };
+  }
   const above = [];
   if (anchors.length) {
     for (let y = Math.max(0, anchors[0].row - 25); y < anchors[0].row; y++) {
@@ -214,6 +244,10 @@ write_dom() {
     canvases,
     overlay,
     grid: { cols: term.cols, rows: term.rows, viewportY: buffer.viewportY, baseY: buffer.baseY, length: buffer.length },
+    // The canvas is sized in device pixels (css x devicePixelRatio) while a cell is measured in CSS pixels, so a
+    // check that a picture lands on given rows needs both scales in the record rather than an assumed ratio.
+    dpr: window.devicePixelRatio,
+    scanCost,
     screen: rect ? { w: Math.round(rect.width), h: Math.round(rect.height) } : null,
     anchors,
     rowsAboveAnchor: above,
@@ -251,14 +285,30 @@ if anchors:
     if m:
         claim = int(m.group(1))
 cell_h = (screen.get("h", 0) / grid["rows"]) if grid.get("rows") else 0
+# Where the bottom edge of a picture drawn for this anchor has to land, in the same device pixels the canvas was
+# sampled in: the top of the anchor's own row, counted from the viewport the browser is looking at. The addon
+# counts rows from 0 and its picture ends at anchor_row * cell_height, which is the same edge; an earlier version
+# of this formula added one and reported every working case as one cell short. A picture drawn anywhere else is the "floating in no-man's land"
+# failure - the byte-driven renderer attaching an image to a buffer line of its own after tmux moved the lines.
+dpr = v.get("dpr") or 1
+box_bottom = (box.get("bottom", -1) + 1) if box else -1
+expect_bottom = ((anchors[0]["row"] - grid.get("viewportY", 0)) * cell_h * dpr) if (anchors and cell_h) else 0
 top = v.get("top") or {}
-print("painted=%s red=%s blue=%s box=%sx%s@%s anchors=%s claim=%s cellH=%.1f claimH=%.1f fetch=%s/%sB top=%s" % (
+print("painted=%s red=%s blue=%s box=%sx%s@%s anchors=%s claim=%s cellH=%.1f claimH=%.1f fetch=%s/%sB top=%s boxBottom=%s expectBottom=%s dpr=%s" % (
     o.get("paintedPixels", 0), o.get("red", 0), o.get("blue", 0),
     box.get("w", 0), box.get("h", 0), box.get("top", -1), len(anchors), claim, cell_h, claim * cell_h,
-    fetch.get("status", "-"), fetch.get("bytes", "-"), top.get("className") or top.get("tag") or "-"))
+    fetch.get("status", "-"), fetch.get("bytes", "-"), top.get("className") or top.get("tag") or "-",
+    box_bottom, round(expect_bottom, 1), dpr))
 for c in d.get("console", []):
     if "anchor" in c.get("text", ""):
         print("console:", c["text"])
+scan = v.get("scanCost") or {}
+if scan:
+    # Per render: the pass count is 50 by construction, and 16.7 renders a second is what xterm's renderer is
+    # called at (RenderService.ts: ON_FRAME_RATE = 16.7ms), so the per-render number is what a hot pane pays.
+    per = scan.get("ms", 0) / max(1, scan.get("passes", 1))
+    print("scanCost: %s passes over %s rows in %sms = %.3fms per scan, %.1f%% of a 16.7ms frame" % (
+        scan.get("passes"), scan.get("rows"), scan.get("ms"), per, per / 16.7 * 100))
 EOS
 }
 
@@ -278,9 +328,17 @@ look() {
   colors=$(echo "$summary" | sed -n 's/.*red=\([0-9]*\).*/\1/p')
   boxh=$(echo "$summary" | sed -n 's/.*box=[0-9]*x\([0-9]*\).*/\1/p')
   claimh=$(echo "$summary" | sed -n 's/.*claimH=\([0-9.]*\).*/\1/p')
+  cellh=$(echo "$summary" | sed -n 's/.*cellH=\([0-9.]*\).*/\1/p')
+  boxbottom=$(echo "$summary" | sed -n 's/.*boxBottom=\([-0-9]*\).*/\1/p')
+  expectbottom=$(echo "$summary" | sed -n 's/.*expectBottom=\([0-9.]*\).*/\1/p')
+  expect_empty=${EXPECT_EMPTY:-0}
   if [ "${painted:-0}" -lt 100 ] || [ "${colors:-0}" -lt 100 ]; then
-    echo "      the addon drew nothing, or drew something that is not the flag"
-    fails=$((fails + 1))
+    if [ "$expect_empty" = 1 ]; then
+      echo "      nothing drawn at this point in the gesture, which this look deliberately permits"
+    else
+      echo "      the addon drew nothing, or drew something that is not the flag"
+      fails=$((fails + 1))
+    fi
   fi
   # Who is on top of the middle of the reserved rows. The canvas can hold the picture and still be underneath the
   # text layer, which is a bug this harness has already been fooled by once.
@@ -288,17 +346,31 @@ look() {
   case "$top" in
     slopyphus-image-anchor) ;;
     *)
-      echo "      something other than the picture layer is on top of the rows it drew: ${top:-nothing}"
-      fails=$((fails + 1))
+      if [ "$expect_empty" = 1 ]; then
+        echo "      layer order not assessed: nothing was drawn to be on top of"
+      else
+        echo "      something other than the picture layer is on top of the rows it drew: ${top:-nothing}"
+        fails=$((fails + 1))
+      fi
       ;;
   esac
   # The drawn height against the height the anchor's own row count implies. The relay reserved rows in cells for a
   # cell size it could not know and the browser measured the cell it was actually given; if the picture lands on
   # the rows the anchor says it owns, the two agreed about a number neither of them could have measured alone.
-  if [ -n "$boxh" ] && [ -n "$claimh" ]; then
+  # Neither size check can say anything about a look that drew nothing at all, which is decided above.
+  if [ "${painted:-0}" -ge 100 ] && [ -n "$boxh" ] && [ -n "$claimh" ]; then
     echo "      drawn height ${boxh}px against the ${claimh}px the anchor's row count implies: $(python3 -c "import sys;print('%s%% apart' % round(abs(float(sys.argv[1]) - float(sys.argv[2])) / float(sys.argv[2]) * 100, 1))" "$boxh" "$claimh")"
     python3 -c "import sys; sys.exit(0 if abs(float(sys.argv[1]) - float(sys.argv[2])) <= 0.15 * float(sys.argv[2]) else 1)" "$boxh" "$claimh" || {
       echo "      the picture is not the size the anchor reserved"
+      fails=$((fails + 1))
+    }
+  fi
+  # Where it landed, not merely whether something appeared. A picture the right size drawn over the wrong rows is
+  # the failure a report described as floating in no-man's land, and a painted-pixel count cannot see it.
+  if [ "${painted:-0}" -ge 100 ] && [ -n "$boxbottom" ] && [ -n "$expectbottom" ] && [ -n "$cellh" ]; then
+    echo "      drawn bottom edge ${boxbottom}px against the ${expectbottom}px the top of the anchor's own row is: $(python3 -c "import sys;print('%s cells apart' % round((float(sys.argv[1]) - float(sys.argv[2])) / float(sys.argv[3]), 2))" "$boxbottom" "$expectbottom" "$cellh")"
+    python3 -c "import sys; sys.exit(0 if abs(float(sys.argv[1]) - float(sys.argv[2])) <= 1.5 * float(sys.argv[3]) else 1)" "$boxbottom" "$expectbottom" "$cellh" || {
+      echo "      the picture is not on the rows its anchor owns"
       fails=$((fails + 1))
     }
   fi
@@ -310,8 +382,12 @@ run_case() {
   port=$((BASE_PORT + case_index))
   container="anchor-$name"
   case_index=$((case_index + 1))
+  # The split case needs no script of its own: it is the emit case, then a pane gesture. The anchor is written by
+  # the relay either way, which is the point - what happens to a picture the grid only *names*.
+  case_script="case-$name.sh"
+  [ "$name" = anchor-split ] && case_script=case-anchor-emit.sh
 
-  start_container "$container" "$port" "case-$name.sh" "$([ "$name" = anchor-text-only ] && echo 1 || echo 0)"
+  start_container "$container" "$port" "$case_script" "$([ "$name" = anchor-text-only ] && echo 1 || echo 0)"
 
   # The pane runs its case before the browser exists (see the ordering note at the top of this file), so give
   # it time, and check it finished from the pane's own side rather than inferring it from the browser.
@@ -338,6 +414,36 @@ run_case() {
     # text and any picture that was only bytes is finished.
     echo "   (looking again from a second client at 900x500)"
     look "$container" "$port" "$name-reattach" --width 900 --height 500
+  fi
+
+  if [ "$name" = anchor-scroll ]; then
+    # tmux's own side of the wheel rather than a simulated one, because tmux is what answers a wheel. The look
+    # while scrolled is recorded without an assertion: a picture whose rows have been scrolled off the top of the
+    # pane drawing nothing is the pane being honest, and asserting it either way would measure the wrong thing.
+    echo "   (in copy-mode, two half-pages up - what a mouse wheel actually is in a tmux pane)"
+    docker exec "$container" tmux copy-mode -ut pane >/dev/null 2>&1 || echo "      copy-mode failed"
+    sleep 1
+    docker exec "$container" tmux send-keys -t pane -X halfpage-up >/dev/null 2>&1 || true
+    docker exec "$container" tmux send-keys -t pane -X halfpage-up >/dev/null 2>&1 || true
+    docker exec "$container" tmux capture-pane -p > "$WORK/$name.copymode" 2>/dev/null || true
+    echo "      the anchor line is in the scrolled view $(grep -c '\[\[img:' "$WORK/$name.copymode" 2>/dev/null || echo 0) time(s)"
+    EXPECT_EMPTY=1 look "$container" "$port" "$name-copymode"
+    echo "   (finishing the gesture: cancel, which reprints the live pane)"
+    docker exec "$container" tmux send-keys -t pane -X cancel >/dev/null 2>&1 || true
+    sleep 1
+    look "$container" "$port" "$name-return"
+  fi
+
+  if [ "$name" = anchor-split ]; then
+    # prefix+% over the agent pane. A vertical split keeps the pane's width, so nothing reflows into the rows the
+    # picture reserved; what changes is the pane's height and the reprint that follows it. A horizontal split is a
+    # different case - a narrower pane with text reflowing into reserved rows - and the honest answer there is that
+    # the text wins and no picture is drawn.
+    echo "   (splitting a shell out of the pane under the picture)"
+    docker exec "$container" tmux split-window -v -p 30 -c /workspace pane >/dev/null 2>&1 || echo "      split-window failed"
+    sleep 2
+    docker exec "$container" tmux capture-pane -p -t pane > "$WORK/$name.after.grid" 2>/dev/null || true
+    look "$container" "$port" "$name-split"
   fi
 
   docker rm -f "$container" >/dev/null 2>&1 || true
