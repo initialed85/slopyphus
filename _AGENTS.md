@@ -78,8 +78,14 @@ container are output, not source- edit the template or the environment, never th
   `_k` in the main flow is clobbered by `render_tab_nav`'s own tab loop, and the failure is silent - tab 1
   renders, no other page is written, and the summary still prints every tab.
 - A desktop is a page per group of panes. `PANES_PER_TAB` (default 6) decides when it splits, and the
-  entrypoint renders `index.html` (tab 1), `tab-2.html` ... `tab-N.html`, plus `all.html` (every pane at
-  once). Every page links `/slopyphus-desktop.css` and `/slopyphus-desktop.js`, which `Dockerfile.nginx`
+  entrypoint renders `tab-1.html` ... `tab-N.html`, plus `all.html` (every pane at once); `/`, `/index.html`
+  and `/tab-1` are aliases of the first of them, and the render deletes any `index.html` it finds. No page is
+  special, so nothing in the renderer branches on tab 1.
+- A pane is framed with ttyd's `disableLeaveAlert=true`, set in `index.html.template`'s iframe URL, because
+  ttyd's default client registers a `beforeunload` handler that would prompt on every tab switch. The fix is
+  a query parameter on the pane's URL (`parseOptsFromUrlQuery` reads it); do not go editing the vendor client
+  for this, and do not drop the parameter from a pane without measuring what the browser then asks -
+  `hack/front-cdp.mjs` reports the dialogs it answered. Every page links `/slopyphus-desktop.css` and `/slopyphus-desktop.js`, which `Dockerfile.nginx`
   copies into the directory nginx serves; the only per-page CSS is the rule that splits the viewport and
   states the tab strip's height, which `render_grid_css` emits inline. So a change to how the desktop
   *looks* is usually those two files plus `index.html.template`, and a change to how panes are *grouped* is

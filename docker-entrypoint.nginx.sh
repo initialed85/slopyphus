@@ -37,8 +37,8 @@
 #   Order is preserved: columns as declared, then rows as declared, cut at the page boundaries, and a
 #   page keeps each pane's group - so a tab holding three columns and three rows is laid out exactly the
 #   way LAYOUT says a 3+3 desktop is, and a tab holding one pane gets the whole viewport.
-#   Pages are files, not a router: index.html is the first tab, tab-2.html ... tab-N.html the rest,
-#   all.html every pane at once. /tab-2 redirects to /tab-2.html. A tab is a page load, which means the
+#   Pages are files, not a router: tab-1.html ... tab-N.html are the tabs, all.html every pane at once,
+#   and / , /index.html and /tab-1 are all spellings of the first tab. /tab-2 redirects to /tab-2.html. A tab is a page load, which means the
 #   panes on the tab you left disconnect from their terminals (tmux keeps the session; the page you arrive
 #   at attaches a new client) and the keyboard broadcast and the expand chord only see the panes on the
 #   page you are on.
@@ -154,8 +154,8 @@ validate_name() {
 # One spec ("a=x,b=y") to a US separated table of: kind US name US upstream US upstream_path US host
 #
 # kind is "agent" (a slopyphus/ttyd container, whose UI lives under its own base path) or "site"
-# (anything else, framed through nginx so the pane stays same-origin and the keyboard relay in
-# index.html keeps working).
+# (anything else, framed through nginx so the pane stays same-origin and the keyboard relay in the desktop
+# page keeps working).
 parse_spec() {
   _spec=${1:-}
   _out=${2:-}
@@ -340,7 +340,16 @@ render_group() {
   while IFS=$US read -r _kind _name _upstream _path _host; do
     printf '        <div class="cell" data-agent="%s" data-upstream="%s%s">\n' "$_name" "$_upstream" "$_path"
     printf '          <span class="tag">%s</span>\n' "$_name"
-    printf '          <iframe id="f-%s" src="/%s/" title="%s" frameborder="0" scrolling="no" style="overflow: hidden"></iframe>\n' \
+    # disableLeaveAlert is ttyd's own client option, read from the page's query by parseOptsFromUrlQuery.
+    # Its default is a beforeunload handler that preventDefaults and sets "Close terminal? this will also
+    # terminate the command.", which this desktop cannot mean: a pane is a tmux client, so closing it leaves
+    # the session and whatever it was running alone. And it is not a rare event here - navigating to another
+    # tab unloads every pane that page holds, which is one prompt per tab switch: Chrome merges the frames'
+    # handlers into a single dialog (measured on a page holding two panes, which produced one prompt).
+    # Measured with hack/front-cdp.mjs: a keystroke on a tab link in a desktop whose panes had open sockets
+    # produced a beforeunload dialog from the pane document (/pane1/), answered left the run on tab-2.html;
+    # the same run against the page below recorded none, and the pane logged "[ttyd] Leave site alert disabled".
+    printf '          <iframe id="f-%s" src="/%s/?disableLeaveAlert=true" title="%s" frameborder="0" scrolling="no" style="overflow: hidden"></iframe>\n' \
       "$_name" "$_name" "$_name"
     printf '        </div>\n'
   done <"$_tsv"
@@ -401,9 +410,8 @@ render_tab_nav() {
   printf '    <nav id="tabs">\n'
   _k=1
   while [ "$_k" -le "$_tabs" ]; do
-    _href=/
+    _href="/tab-$_k.html"
     _name="tab $_k"
-    if [ "$_k" -gt 1 ]; then _href="/tab-$_k.html"; fi
     _hint=$(trim "$(agent_names "$tmp/tab-$_k.columns.tsv" "$tmp/tab-$_k.rows.tsv" | tr '\n' ' ')")
     if [ "$_k" = "$_self" ]; then
       printf '      <a href="%s" title="%s (%s)" aria-current="page">%d</a>\n' "$_href" "$_name" "$_hint" "$_k"
@@ -436,19 +444,21 @@ render_tab_nav() {
 # about where the front is.
 render_page_locations() {
   _tabs=${1:-1}
+  # Tab 1 is a page like every other tab, so the front's landing URL is an alias of it rather than a
+  # rendered file of its own. /index.html keeps an alias too: it is the URL every front of this repo has
+  # ever served, and nginx's own `index` directive is not enough here because the alias is also where
+  # Cache-Control: no-store gets attached to a request for the landing page.
+  printf '  location = / {\n    add_header Cache-Control "no-store";\n    try_files /tab-1.html =404;\n  }\n\n'
+  printf '  location = /index.html {\n    add_header Cache-Control "no-store";\n    try_files /tab-1.html =404;\n  }\n\n'
   _k=1
   while [ "$_k" -le "$_tabs" ]; do
-    if [ "$_k" = 1 ]; then
-      printf '  location = /tab-1 {\n    add_header Cache-Control "no-store";\n    try_files /index.html =404;\n  }\n\n'
-    else
-      printf '  location = /tab-%d {\n    add_header Cache-Control "no-store";\n    try_files /tab-%d.html =404;\n  }\n\n' "$_k" "$_k"
-    fi
+    printf '  location = /tab-%d {\n    add_header Cache-Control "no-store";\n    try_files /tab-%d.html =404;\n  }\n\n' "$_k" "$_k"
     _k=$((_k + 1))
   done
   if [ "$_tabs" -gt 1 ] 2>/dev/null; then
     printf '  location = /all {\n    add_header Cache-Control "no-store";\n    try_files /all.html =404;\n  }\n\n'
   fi
-  printf '  location ~ ^/(index|all|tab-[0-9]+)\\.html$ {\n    add_header Cache-Control "no-store";\n  }\n\n'
+  printf '  location ~ ^/(all|tab-[0-9]+)\\.html$ {\n    add_header Cache-Control "no-store";\n  }\n\n'
   printf '  location = /slopyphus-desktop.css {\n    add_header Cache-Control "no-store";\n  }\n\n'
   printf '  location = /slopyphus-desktop.js {\n    add_header Cache-Control "no-store";\n  }\n\n'
 }
@@ -574,10 +584,17 @@ if [ -z "$HTML_DIR" ]; then HTML_DIR=/; fi
 # the served directory, and a stale page is one that still works: it would show panes that are no longer on
 # the desktop, framing locations that no longer exist. The front owns those names - validate_name refuses an
 # agent that would collide with them - so it clears them before writing the set this render asked for.
-rm -f "$HTML_DIR"/tab-*.html "$HTML_DIR/all.html" 2>/dev/null || true
+# index.html is cleared as well: it is nginx's own welcome page in a fresh image and the page an older
+# rollout rendered, and neither is a page this front serves any more (it is an alias of tab-1 now).
+# The two output directories are created first: a directory that is not there is a crash whose message names
+# a file ("can't create /tmp/rendered/tab-1.html: nonexistent directory"), which in the image never happens
+# and in a hand-run render is the whole difference between a debug loop and an hour lost.
+mkdir -p "$(dirname "$CONF_OUT")" "$HTML_DIR"
+rm -f "$HTML_DIR"/tab-*.html "$HTML_DIR/all.html" "$HTML_DIR/index.html" 2>/dev/null || true
 
-# One page per tab, from one template. Tab 1 is index.html so the front's existing URL (/) keeps being
-# the desktop, and the tabs after it are files a browser can be pointed at directly.
+# One page per tab, from one template, tab-1.html first. No page is special: the landing URL, /tab-1 and
+# /index.html are all aliases of the same file, which is why the render writes one name per tab and the
+# location set decides what a URL means.
 #
 # The loop's own variables are named _page_* rather than the _k / _out the renderers use internally,
 # because this script is written for busybox ash and calls no function-local variables: a renderer's _k
@@ -586,13 +603,8 @@ rm -f "$HTML_DIR"/tab-*.html "$HTML_DIR/all.html" 2>/dev/null || true
 # other tab, and still prints a summary claiming it made them all.
 _page=1
 while [ "$_page" -le "$page_tabs" ]; do
-  if [ "$_page" -gt 1 ]; then
-    _page_title="$PAGE_TITLE - tab $_page"
-    _page_out="$HTML_DIR/tab-$_page.html"
-  else
-    _page_title=$PAGE_TITLE
-    _page_out=$HTML_OUT
-  fi
+  _page_title="$PAGE_TITLE - tab $_page"
+  _page_out="$HTML_DIR/tab-$_page.html"
   render_groups "$tmp/tab-$_page.columns.tsv" "$tmp/tab-$_page.rows.tsv" >"$tmp/groups.frag"
   render_grid_css "$tmp/tab-$_page.columns.tsv" "$tmp/tab-$_page.rows.tsv" "$page_tabs" >"$tmp/gridcss.frag"
   render_tab_nav "$page_tabs" "$_page" "$([ "$page_tabs" -gt 1 ] && echo all)" \

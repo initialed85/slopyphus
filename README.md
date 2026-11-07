@@ -45,7 +45,7 @@ docker compose up -d          # coordinator, coder-1..4, tester, deployer, and n
 
 # Composing a desktop
 
-The front renders `nginx.conf` and `index.html` at container start from these variables:
+The front renders `nginx.conf` and the desktop's pages at container start from these variables:
 
 | variable | default | meaning |
 | --- | --- | --- |
@@ -213,9 +213,22 @@ Two things that follow from this and are worth knowing before changing it:
 
 The desktop is a page per group of panes, not one page holding every pane. `PANES_PER_TAB` (default 6) is
 how many panes a page may show before the desktop is split, and the front renders the pages at container
-start: `index.html` is tab 1, `tab-2.html` ... `tab-N.html` are the rest, `all.html` is every pane at
+start: `tab-1.html` ... `tab-N.html` are the tabs, `all.html` is every pane at
 once. A tab is therefore a URL you can hand to someone — `https://front.dev.initialed85.cc/tab-2.html` —
-and `/tab-2` is a spelling of the same page.
+and `/tab-2` is a spelling of the same page. Tab 1 is not a special file: the landing URL `/`, `/index.html`
+and `/tab-1` are all spellings of `tab-1.html`, and an older rollout's `index.html` is removed at render so
+it cannot be served by accident.
+
+Switching tabs unloads the panes of the page you left, and a terminal client warns before it is unloaded.
+`docker-entrypoint.nginx.sh` therefore frames every pane with ttyd's own `disableLeaveAlert=true`, which drops
+the `beforeunload` handler ttyd would otherwise register ("Close terminal? this will also terminate the
+command."). That warning is not true here — a pane is a tmux client, so closing it leaves the session and
+whatever it was running alone — and on a tabbed desktop it would fire on every tab switch. Chrome merges the
+panes' handlers into one prompt per navigation (a page holding two panes produced one dialog, not two), so it
+is one interruption per switch rather than one per pane. Chrome only raises a `beforeunload` prompt after a
+real gesture, which is what clicking a tab is, so a scripted `element.click()` will not show it: the way to
+measure this is a browser. `hack/front-cdp.mjs` records the dialogs it answered (`dialogs` in its report) and
+the URLs the run ended on (`navigations`), and a pane's own console says `[ttyd] Leave site alert disabled`.
 
 The split is by count, not by geometry, and it is balanced: 20 panes at 6 per tab is 4 pages of 5, not
 6,6,6,2, because four pages with four different pane widths is four desktops and four pages of 5 is one.
@@ -368,7 +381,7 @@ docker run --rm -e COLUMNS='a,b' -e ROWS='c' -e LAYOUT=rows_top \
 
 # look at what it rendered instead
 docker run --rm -e COLUMNS='a,b' --entrypoint /docker-entrypoint.nginx.sh \
-  initialed85/slopyphus-nginx sh -c 'cat /etc/nginx/conf.d/default.conf; echo; cat /usr/share/nginx/html/index.html'
+  initialed85/slopyphus-nginx sh -c 'cat /etc/nginx/conf.d/default.conf; echo; cat /usr/share/nginx/html/tab-1.html'
 ```
 
 The desktop the cluster actually runs is worth rendering on its own, because it is the one shape where

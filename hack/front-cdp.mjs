@@ -185,6 +185,11 @@ await new Promise((resolve, reject) => {
 let id = 0;
 const pending = new Map();
 const events = [];
+// The listener runs before the run has a target to talk to, so the session a dialog arrived on is kept
+// here: a Page.* command sent without the session id of the page that opened the dialog is rejected, and a
+// rejected answer leaves the dialog open with the navigation it was holding.
+let activeSession = null;
+const dialogErrors = [];
 ws.addEventListener("message", (event) => {
   const msg = JSON.parse(event.data);
   if (msg.id && pending.has(msg.id)) {
@@ -193,6 +198,14 @@ ws.addEventListener("message", (event) => {
     msg.error ? reject(new Error(JSON.stringify(msg.error))) : resolve(msg.result);
   } else if (msg.method) {
     events.push(msg);
+    // A beforeunload dialog is the browser holding a navigation, which is what a desktop tab link triggers
+    // while a pane's client has a beforeunload handler registered (ttyd's own onWindowUnload preventDefaults
+    // and sets a returnValue). The page cannot observe its own dialog, so the event is the measurement - and
+    // answering it is what keeps a headless run from hanging on a prompt nobody is there to click. Every
+    // dialog a run accepted is reported, so the intervention is never invisible.
+    if (msg.method === "Page.javascriptDialogOpening") {
+      send("Page.handleJavaScriptDialog", { accept: true }, msg.sessionId ?? activeSession).catch((e) => dialogErrors.push(String(e?.message ?? e)));
+    }
   }
 });
 
@@ -226,6 +239,7 @@ async function acquireTarget() {
 
 const target = await acquireTarget();
 const { sessionId } = await send("Target.attachToTarget", { targetId: target.targetId, flatten: true });
+activeSession = sessionId;
 
 await send("Page.enable", {}, sessionId);
 if (captureConsole) {
@@ -421,10 +435,28 @@ if (captureConsole) {
   outcome.console = consoleLines.concat(logLines);
 }
 
+// What the browser did, as distinct from what the page said: dialogs it opened (and this run answered),
+// and the top-frame URLs the run actually ended up on. Clicking a tab link is only worth testing if a run
+// can say "no prompt" or "a prompt, and then /tab-2.html".
+outcome.dialogs = events
+  .filter((e) => e.method === "Page.javascriptDialogOpening")
+  .map((e) => ({ type: e.params?.type, message: e.params?.message, url: e.params?.url }));
+outcome.dialogErrors = dialogErrors;
+outcome.navigations = events
+  .filter((e) => e.method === "Page.frameNavigated" && !e.params?.frame?.parentId)
+  .map((e) => e.params?.frame?.url);
+
 if (shot) {
-  const { data } = await send("Page.captureScreenshot", { format: "png" }, sessionId);
-  writeFileSync(shot, Buffer.from(data, "base64"));
-  outcome.shot = shot;
+  // A run that clicked a link is mid-navigation when the screenshot is asked for, and CDP answers that with
+  // "Not attached to an active page". The dialogs and URLs a run travelled through are the part of the
+  // report that matters in that case, so a failed screenshot is recorded instead of killing the run.
+  try {
+    const { data } = await send("Page.captureScreenshot", { format: "png" }, sessionId);
+    writeFileSync(shot, Buffer.from(data, "base64"));
+    outcome.shot = shot;
+  } catch (e) {
+    outcome.shotError = String(e?.message ?? e);
+  }
 }
 
 if (!has("keep-tab")) {

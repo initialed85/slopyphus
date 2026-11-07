@@ -12,7 +12,11 @@ server {
   server_name _;
 
   root /usr/share/nginx/html;
-  index index.html;
+  # The front no longer renders an index.html: tab 1 is tab-1.html like every other tab, and the entrypoint
+  # removes any index.html left behind (nginx's own welcome page included). This directive is the belt; the
+  # entrypoint's `location = /` is the braces, since that location is also where a request for the landing
+  # page picks up Cache-Control: no-store.
+  index tab-1.html;
 
   # Reserved name; an agent may not be called "healthz" (the entrypoint enforces it).
   # Answers even when every agent upstream is down, so a Kubernetes probe measures this container

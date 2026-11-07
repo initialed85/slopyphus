@@ -144,11 +144,11 @@ case "$cmd" in
     docker_cmd exec "$TESTBED_NAME" cat /etc/nginx/conf.d/default.conf
     ;;
   html)
-    docker_cmd exec "$TESTBED_NAME" cat /usr/share/nginx/html/index.html
+    docker_cmd exec "$TESTBED_NAME" cat /usr/share/nginx/html/tab-1.html
     ;;
   # pages: what the generator actually produced, which is the first question tabs raise. One line per
   # page with its pane count, because "the desktop fits on one page" and "it did not" look identical from
-  # a screenshot of index.html alone.
+  # a screenshot of tab-1.html alone.
   pages)
     docker_cmd exec "$TESTBED_NAME" sh -c 'cd /usr/share/nginx/html && for f in *.html; do printf "%-14s %2d iframes  nav=%s\n" "$f" "$(grep -c "<iframe" "$f")" "$(grep -c "nav id" "$f")"; done'
     ;;
@@ -159,7 +159,7 @@ case "$cmd" in
   # restart- iterate on the scratch file, then bake the result into index.html.template and sync.
   push)
     [ $# -ge 2 ] || die "push needs a file to put in the container's html directory"
-    target=${3:-index.html}
+    target=${3:-tab-1.html}
     docker_cmd cp "$2" "$TESTBED_NAME:/usr/share/nginx/html/$target"
     printf 'pushed %s -> /usr/share/nginx/html/%s in %s (no restart: a restart re-renders and discards it)\n' "$2" "$target" "$TESTBED_NAME"
     ;;
