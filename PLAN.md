@@ -649,8 +649,11 @@ byte-level probe of the client's stream cannot confirm the wrapper was used. Pro
 ### The shape of the fix
 
 1. **Relay** (the pane's own side of the pipe): shipped as above.
-2. **ttyd fork**: a GET sibling of the upload endpoint that serves those files, restricted to the pane's own
-   `.slopyphus/images/`, content-addressed names so `Cache-Control: immutable` is honest.
+2. **ttyd fork**: shipped as ttyd d2fc92b — `GET <base-path>images/<name>` reads
+   `<working directory>/<--image-dir>/<name>` (default `.slopyphus/images`), name validated to ten lowercase hex
+   digits plus one of the four extensions the relay writes, type from the name, bytes never sniffed, `Cache-Control:
+   public, max-age=31536000, immutable`, `lstat`/`fstat` identity check so a planted symlink is refused, and an
+   absolute `--image-dir` rejected at startup.
 3. **ttyd client**: an addon (the house already has `addons/overlay.ts` for drawing over the grid) holding a
    `sha -> ImageBitmap` map, scanning rendered buffer lines for the anchor token and drawing the stored image over
    its reserved rows on every render, resize and scroll. Persistence then lives in a file and in the browser, and
@@ -669,7 +672,16 @@ byte-level probe of the client's stream cannot confirm the wrapper was used. Pro
       saved file, the hash-prefix naming, refresh-not-duplicate, and mtime pruning with the ages stated rather than
       left to the clock). Off by default, so the shipped byte stream is unchanged - the byte-exactness check against
       `hack/pi-image-bytes.mjs --wrap-tmux` still passes
-- [ ] ttyd fork: the GET endpoint, its path restriction, its cache headers, and a `hack/` probe that proves all three
+- [x] ttyd fork: the GET endpoint, its path restriction, its cache headers, and a `hack/` probe that proves all
+      three. `hack/image-endpoint.sh` builds the fork in the same container base the image build uses (this pod has
+      no compiler, and its filesystem is not visible to the Docker daemon on bee-2, so the source arrives on stdin
+      as a tar) and passes 23 cases: the served picture is 200 with `image/png`, the immutable cache header, the
+      file's own `Content-Length` and a byte-identical body; a right-shaped name whose bytes are not a picture is
+      served as bytes rather than sniffed; and nine wrong shapes, four percent-encoded or NUL path escapes, a
+      planted symlink into `/etc/passwd`, `/images/` itself, `/index.html` and a raw `.slopyphus/secret` are all
+      refused with the same 404 as a picture that is merely absent. The NUL case is answered by libwebsockets
+      closing the connection rather than by this handler, which the probe records as `noresponse` instead of
+      pretending it was a 404.
 - [ ] client addon: anchor scan, image store, redraw on render/resize/scroll
 - [ ] turn the anchor on in the entrypoint, once the client understands it, so users never see a token with no picture
 - [ ] measure the outcome rather than the implementation: CDP screenshots showing the image still present after a
@@ -692,6 +704,7 @@ byte-level probe of the client's stream cannot confirm the wrapper was used. Pro
 ## Validation recipe
 
 ```sh
+hack/image-endpoint.sh                  # build the fork in a container, then assert the image route's 23 cases
 hack/front-testbed.sh --build            # ttyd test bed on 127.0.0.1:7654 (localhost, CDP works)
 hack/build-ttyd-client.sh               # regenerate vendor/ttyd/src/html.h
 hack/html-h-payload.mjs --verbose       # detect html.h drift before pushing
