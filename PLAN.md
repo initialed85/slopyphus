@@ -728,25 +728,85 @@ a sentence is only a missing picture.
       pretending it was a 404.
 - [x] client addon: anchor scan, image store, redraw on render/resize/scroll (ttyd 0f299b7, `src/html.h` rebuilt
       by `hack/build-ttyd-client.sh`, pinned by slopyphus below)
-- [ ] turn the anchor on in the entrypoint, once the client understands it, so users never see a token with no picture
+- [ ] turn the anchor on in the entrypoint (`OSC_WRAP_ANCHOR=1` in the pane's environment), now that the client
+      understands it, so users never see a token with no picture. Held only on a stated word from Ed about the pod
+      roll: the push rebuilds the image, the agent pods roll, and every live Pi session in them dies mid-sentence.
+      home-ops confirmed nothing on the cluster blocks it (Argo apps Synced/Healthy, Longhorn 8/8 at 2 replicas, the
+      cordoned nodes run no slopyphus) and said, correctly, that the constraint is Ed's to release and not theirs.
 - [x] measure the outcome rather than the implementation, for three shapes of it: a browser that attaches after the
       picture was printed, a reattach at a different viewport size, and a pane that never received image bytes at
       all - all three put the picture on the anchor's reserved rows (`hack/image-anchor-cases.sh`). A wheel scroll
-      into copy-mode and a tmux pane menu are still measured only in tmux's grid (`hack/live-pi-wrap.sh`), where
-      the anchor survives and the bytes do not, not yet in a browser.
-- [ ] stop sending the inline burst, or keep it: today a picture is drawn twice on a fresh frame - once by
-      `@xterm/addon-image` from the bytes and once by this addon from the anchor - which is invisible because they
-      draw the same thing on the same rows, and has not been measured as a cost.
+      into copy-mode and a tmux pane menu are now measured in a browser as well as in tmux's grid: both cases exist
+      in the harness (`anchor-scroll`, `anchor-split`), driven from tmux's own side (`copy-mode -u`, `halfpage-up`
+      twice, `cancel`; `split-window -v`) because tmux is what answers a wheel.
+- [x] stop sending the inline burst. Decided on a report rather than on a worry: a picture ended up "floating out
+      there in no-man's land", drawn under the tmux status bar and over another pane's prompt, which is what two
+      renderers of the same picture do - `@xterm/addon-image` attaches an image to its own buffer lines and tmux's
+      reprints move those lines, while an anchor is grid text and can only redraw where the pane put it. `--anchor`
+      now sends the file, the reserved rows and the anchor line and no bytes; `--inline` sends both for a terminal
+      that cannot read an anchor, and an image whose size cannot be read falls back to its bytes.
 - [ ] README (keyboard table, `PI_PANE_MODE`, what an image now is) and this plan updated with what was learned
 
-### Open questions to settle while building
+### Fourth half shipped (07/11): the anchor is the picture, and the scan of it is not cached
 
-- Anchor visible or invisible: a visible token is greppable, survives tmux's grid, and is honest about a picture
-  being there; an OSC-only anchor would not survive the repaint, which is the entire reason for putting it in the
-  grid. The visible token is the direction unless the front's owner objects to the extra line.
-- What draws it: `@xterm/addon-image` ^0.7.0 is what renders these pictures today (ttyd's `-t enableSixel=true`
-  loads it, and it is the source of the `1337`/IIP support in the shipped bundle). It is fed from the byte stream,
-  so an anchor-driven draw needs either its own addon or a patch to that addon, not a reuse.
+Two reports from the live front end, both phrased as disappearance:
+
+- "when you scroll the mouse (or probably hit the up-arrow / page up) the image seems to disappear"
+- "it doesn't deal too well when you use the tmux shortcuts e.g. to split a pane out into a shell … you end up with
+  the image just kinda floating out there in no-man's land", with a screenshot showing a picture drawn below the
+  tmux status bar and over a second pane's prompt lines.
+
+The second one is the interesting one, because something *was* drawn, in the wrong place. That is what two renderers
+drawing one picture does: the inline byte stream feeds `@xterm/addon-image`, which keeps its images attached to
+buffer lines of *its own*, and tmux's reprints - a split, a resize, a copy-mode round trip - move those lines out
+from under it. An anchor is grid text; it cannot end up anywhere except where the pane put it. So the byte stream is
+now suppressed when anchoring (`tools/tmux-osc-wrap.py` 91e… slopyphus da8d993), with `--inline` for a terminal that
+cannot read an anchor and a byte fallback for an image whose size the relay cannot read.
+
+The first one took three harness runs to see, and what it measured was the harness's own luck: three runs of the same
+build and the same cases gave 15 asserted looks with 2 failures, then 8 with 1, then none. The failing looks logged
+nothing, and the JSON beside them showed the anchor line in the viewport the browser was looking at, with the picture
+fetching fine (200, image/png, 342 bytes). A cached scan answer, still internally consistent, no longer true - the
+third bug in this feature with exactly that shape. The viewport key (viewportY, baseY, buffer length, cols, rows,
+canvas size, cursor) had already been wrong once; adding the cursor fixed the measured case and left the class: a
+program that rewrites a viewport and parks the cursor where it already was leaves that key untouched. A mouse wheel
+in a tmux pane is precisely such a rewrite - tmux answers `WheelUpPane` with copy-mode, reprints a history slice, and
+then reprints the live pane with the cursor back where it started.
+
+So the addon now scans the grid on *every* render and caches nothing about the answer (ttyd 0088004). What is cached
+is the picture's bytes, keyed by content hash. The cost is measured in the harness rather than assumed - the page
+reports `scanCost`: 50 passes over 32-52 rows in 1.0-4.8 ms, so 0.02-0.096 ms per scan, 0.1-0.6% of the 16.7 ms
+frame xterm's `RenderService` is called at (`vendor/xterm.js/src/browser/RenderService.ts: ON_FRAME_RATE`). A render
+that measures the terminal as zero wide or tall now asks once for another render instead of returning into a pane
+that may go idle and never render again. And a declined picture says why: which row, what it now reads, or which of
+the reserved rows is not empty - because "nothing was drawn" and "the guard refused to draw" are indistinguishable
+from outside, which is why both reports could only be phrased as vanishing.
+
+After: 24 asserted looks over 3 runs, 0 failures, with the drawn bottom edge checked against the top of the anchor's
+own row (0.0 cells apart in every case) so a picture drawn at the right size in the wrong place fails the case.
+
+### What is still not known about a disappearance
+
+- Pi's own redraws are unmeasured. Pi's chat reflows as it types, and a reflow that moves a picture's rows moves the
+  anchor with them - which is fine - but whether Pi *re-emits* the image bytes when it repaints its transcript has
+  not been looked at, and with anchoring on, a re-emission would now be the only way its own redraw could draw it.
+- A horizontal split is a different case from the vertical one the harness measures: a narrower pane reflows text
+  into the rows a picture reserved, and the guard's answer there is that the text wins and no picture is drawn. That
+  is deliberate - a covered sentence is lost, a covered picture is only a lost picture - but it means a narrow pane
+  with a long line above an anchor shows the anchor and not the picture.
+- Anchoring hides a picture from a terminal that cannot read an anchor. `tmux attach` from ssh in iTerm2 shows the
+  token and nothing else. `--inline` is the answer and it is a per-pane decision, which is a sharp edge worth naming
+  in the README.
+
+### Questions from the design that are now settled, and the ones that are not
+
+- Settled: anchor visible or invisible. The visible token is what survives, is greppable, and is honest about a
+  picture being there; an OSC-only anchor would not survive the repaint, which was the entire reason for putting it
+  in the grid. It is what shipped.
+- Settled, and not in the way the question expected: what draws it. `@xterm/addon-image` ^0.7.0 stays fed by the byte
+  stream and is now *not* fed at all when anchoring, because two renderers of one picture were measured disagreeing
+  after a pane split. The anchor has its own addon (`html/src/components/terminal/xterm/addons/image-anchor.ts`) and
+  it is the only thing drawing these pictures in a browser.
 - Where the images live across restarts: `.slopyphus/uploads/` already survives on the pane's volume, so
   `.slopyphus/images/` should too. Retention now has a default - the newest `OSC_WRAP_IMAGE_KEEP` (200) files,
   pruned by mtime - which is a guess about how much history one agent wants and is worth revisiting once the
@@ -756,6 +816,11 @@ a sentence is only a missing picture.
 
 ```sh
 hack/image-endpoint.sh                  # build the fork in a container, then assert the image route's 23 cases
+python3 hack/test-osc-wrap-rows.py      # the relay's byte contract: 75 cases, anchoring included
+sh hack/image-anchor-cases.sh <test image tag>   # the anchor end to end in a browser: emit, reattach at another
+                                   # viewport, tmux copy-mode up two half-pages and back (a mouse wheel), a pane
+                                   # split, and an anchor with no image bytes anywhere. Checks the drawn box's
+                                   # bottom edge against the top of the anchor's own row, and reports scanCost.
 hack/front-testbed.sh --build            # ttyd test bed on 127.0.0.1:7654 (localhost, CDP works)
 hack/build-ttyd-client.sh               # regenerate vendor/ttyd/src/html.h
 hack/html-h-payload.mjs --verbose       # detect html.h drift before pushing
