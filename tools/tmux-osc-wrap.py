@@ -57,14 +57,23 @@ disagrees can say so, and the `Npx` / `N%` spellings additionally need a cell he
 (`OSC_WRAP_CELL_HEIGHT_PX`), which is a stated assumption about whoever is looking rather than a measurement.
 An image whose format the relay cannot read reserves nothing, which is the behaviour from before this fix rather
 than a wrong guess.
+
+It can also name the pictures it passes. `--anchor` writes each image under the pane's own working directory and
+prints a dim line of text - `[[img:<10 hex>]]` - on the row below the space it reserved. That line is the point:
+tmux's grid holds cells and stores no copy of an inline image, so every repaint (a wheel scroll, a pane resize, a
+pane menu, a client reattach) erases a picture that was only ever a burst of bytes, while a line of text survives
+all of them. The browser side is what turns the line back into the picture; until it exists the flag stays off,
+because an anchor nobody understands is just text in someone's transcript.
 """
 
 import base64
 import errno
 import fcntl
+import hashlib
 import math
 import os
 import pty
+import re
 import select
 import signal
 import struct
@@ -91,6 +100,17 @@ CELL_RATIO = float(os.environ.get("OSC_WRAP_CELL_RATIO", "0.5"))
 CELL_HEIGHT_PX = float(os.environ.get("OSC_WRAP_CELL_HEIGHT_PX", "15"))
 RESERVE = os.environ.get("OSC_WRAP_RESERVE", "on").lower() not in ("off", "0", "no")
 
+# Whether the relay also names the pictures it passes: save the bytes under the pane's own working directory and
+# print the anchor line that says where the picture belongs. Off by default until the browser side understands the
+# naming, because an anchor nothing understands is just a line of text in someone's transcript. Saving and
+# anchoring are one switch on purpose - a file with no anchor is a picture nothing will ever ask for.
+ANCHOR = os.environ.get("OSC_WRAP_ANCHOR", "off").lower() not in ("off", "0", "no")
+# Relative to the relay's working directory, which is the pane's: ttyd starts the pane with -w /workspace/$NAME
+# and the relay inherits that, so this lands beside the directory a browser paste writes into. Same place, same
+# meaning: pictures belonging to this pane.
+IMAGES_DIR = os.environ.get("OSC_WRAP_IMAGES_DIR", ".slopyphus/images")
+IMAGE_KEEP = int(os.environ.get("OSC_WRAP_IMAGE_KEEP", "200"))
+
 
 def wrap(payload: bytes) -> bytes:
     """The one wrapper spelling tmux 3.6a accepts: intro, doubled payload, single closing ST."""
@@ -116,12 +136,13 @@ def terminator(buf: bytearray, start: int) -> int:
 class Rewriter:
     """Streaming wrapper. feed() returns the bytes that are safe to send to the terminal now."""
 
-    def __init__(self, enable=True, reserve=RESERVE, term_size=(80, 24)):
+    def __init__(self, enable=True, reserve=RESERVE, anchor=ANCHOR, term_size=(80, 24)):
         self.buf = bytearray()
         self.enable = enable
         self.reserve = reserve
+        self.anchor = anchor
         self.term_size = term_size
-        self.stats = {"images": 0, "rows": 0}
+        self.stats = {"images": 0, "rows": 0, "anchors": 0}
 
     def _flush_partial(self, out: bytearray):
         # Emit everything except a tail that could still turn out to be the start of an introducer.
@@ -171,6 +192,14 @@ class Rewriter:
                     out += reserve_newlines(n)
                     self.stats["images"] += 1
                     self.stats["rows"] += n
+                    if self.anchor:
+                        # An anchor is only worth printing when the room the picture needs is also known. An
+                        # anchor the browser cannot size is a picture drawn over somebody's text.
+                        raw, kind = decode_image(payload)
+                        digest = save_image(raw, kind) if raw else ""
+                        if digest:
+                            out += anchor_line(digest)
+                            self.stats["anchors"] += 1
         return bytes(out)
 
     def idle(self) -> bytes:
@@ -332,23 +361,120 @@ def reserve_newlines(n: int) -> bytes:
     return b"\r\n" * max(0, n)
 
 
+def image_kind(raw: bytes) -> str:
+    """Name an image by its magic bytes. The set here is the set image_dimensions can measure the size of."""
+    if raw[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if raw[:6] in (b"GIF87a", b"GIF89a"):
+        return "gif"
+    if raw[:2] == b"BM":
+        return "bmp"
+    if raw[:2] == b"\xff\xd8":
+        return "jpg"
+    return ""
+
+
+def decode_image(payload: bytes):
+    """The whole base64 of an OSC 1337 File= sequence as bytes, plus its format name, or (b"", "").
+
+    image_dimensions reads only the first 2 KB of base64 because the row reservation only needs the header. Keeping
+    a picture needs all of it, and the same scan for the terminator is deliberate: it is how the two halves of this
+    file decide where the payload ends.
+    """
+    body = payload[2:]
+    at = body.find(b":")
+    if at == -1:
+        return b"", ""
+    blob = body[at + 1:]
+    end = 0
+    while end < len(blob) and blob[end] not in (0x07, 0x1B):
+        end += 1
+    try:
+        raw = base64.b64decode(blob[:end], validate=False)
+    except Exception:
+        return b"", ""
+    kind = image_kind(raw)
+    return (raw, kind) if kind else (b"", "")
+
+
+def save_image(raw: bytes, kind: str) -> str:
+    """Write the picture under the pane's own working directory and return the id its anchor carries.
+
+    The name is a prefix of the content hash, so the same picture read twice is one file, a viewer can cache it
+    forever, and nothing here needs a database or a manifest. Only files this function wrote are ever pruned.
+    """
+    digest = hashlib.sha256(raw).hexdigest()[:10]
+    name = f"{digest}.{kind}"
+    path = os.path.join(IMAGES_DIR, name)
+    try:
+        os.makedirs(IMAGES_DIR, mode=0o700, exist_ok=True)
+        if os.path.exists(path):
+            os.utime(path, None)  # a refresh counts as use, so the retained set is the most recent one
+        else:
+            with open(path, "wb") as handle:
+                handle.write(raw)
+            prune_images()
+    except OSError as exc:
+        sys.stderr.write(f"tmux-osc-wrap: could not save {name}: {exc}\n")
+        return ""
+    return digest
+
+
+def prune_images():
+    """Keep the newest IMAGE_KEEP pictures and drop the rest, oldest first. Only names this relay wrote."""
+    pattern = re.compile(r"[0-9a-f]{10}\.(png|gif|bmp|jpg)\Z")
+    try:
+        names = [n for n in os.listdir(IMAGES_DIR) if pattern.fullmatch(n)]
+        stat = sorted((os.stat(os.path.join(IMAGES_DIR, n)).st_mtime, n) for n in names)
+    except OSError:
+        return
+    for _mtime, name in stat[: max(0, len(stat) - IMAGE_KEEP)]:
+        try:
+            os.remove(os.path.join(IMAGES_DIR, name))
+        except OSError:
+            pass
+
+
+def anchor_line(digest: str) -> bytes:
+    """Where a picture belongs, written as ordinary text so tmux keeps it.
+
+    tmux's grid stores cells. `capture-pane -p -e` on a pane that has just drawn an inline image reports zero
+    copies of it in the pane's history, so every repaint is destructive: `WheelUpPane -> copy-mode -e` reprints a
+    history slice, a resize reprints the pane, `MouseDown3Pane`'s display-menu draws over it, a reattach reprints
+    for the new client. Only the application re-emitting the bytes restores the picture, which is the "sometimes it
+    comes back" behaviour the row reservation alone could not fix.
+
+    A line of text is the one thing that survives all of that, so the record is text: dimmed so it reads as a
+    marker rather than as content, on the row immediately below the reserved ones, carrying the id of the saved
+    file. The browser draws the picture in the reserved rows above it, sized the way reserve_rows sized them here.
+    """
+    return b"\x1b[2m[[img:" + digest.encode("ascii") + b"]]\x1b[0m\r\n"
+
+
 def main():
     argv = sys.argv[1:]
     force = None
     reserve = RESERVE
-    while argv and argv[0] in ("--force", "--no-force", "--no-reserve"):
+    anchor = ANCHOR
+    while argv and argv[0] in ("--force", "--no-force", "--no-reserve", "--anchor", "--no-anchor"):
         arg = argv.pop(0)
         if arg == "--no-reserve":
             reserve = False
+        elif arg == "--anchor":
+            anchor = True
+        elif arg == "--no-anchor":
+            anchor = False
         else:
             force = arg == "--force"
     if not argv or argv[0] in ("-h", "--help"):
         sys.stderr.write(
-            "usage: tmux-osc-wrap.py [--force|--no-force] [--no-reserve] command [args...]\n"
+            "usage: tmux-osc-wrap.py [--force|--no-force] [--no-reserve] [--anchor|--no-anchor] command [args...]\n"
             "Wraps OSC 1337 image sequences in tmux's passthrough DCS. Enabled only when $TMUX is set unless\n"
             "--force is given, because in a pane without tmux the wrapper is a sequence the outer terminal has\n"
             "no reason to understand. After an image it prints blank rows for the rows the picture covers,\n"
             "because xterm.js does not move the cursor for an inline image; --no-reserve turns that off.\n"
+            "--anchor additionally saves each picture under the pane's working directory and prints the text line\n"
+            "that records where it belongs; off until the browser side reads those lines.\n"
         )
         sys.exit(0 if argv and argv[0] == "--help" else 2)
 
@@ -413,7 +539,7 @@ def main():
         signal.signal(sig, forward)
     signal.signal(signal.SIGWINCH, winch)
 
-    rw = Rewriter(enable, reserve=reserve, term_size=pane_size())
+    rw = Rewriter(enable, reserve=reserve, anchor=anchor, term_size=pane_size())
     closed = False
     while True:
         if state["winch"]:

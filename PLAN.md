@@ -624,11 +624,31 @@ default. ttyd fork d101262, `src/html.h` rebuilt by `hack/build-ttyd-client.sh`,
   some don't, mostly it figures it out" behaviour.
 - The relay cannot fix this on its own. It sits below tmux, and tmux reprints never pass through it.
 
+### Second half shipped (07/11): the relay names the pictures
+
+`--anchor` (and `OSC_WRAP_ANCHOR`, default **off** until the browser side can read them) decodes each OSC 1337
+payload it passes, writes it to the pane's own `.slopyphus/images/<10 hex of sha256>.<png|gif|bmp|jpg>`, keeps the
+row reservation, and prints one dim text line - `[[img:<10 hex>]]` - on the row below the reserved ones. Saving and
+anchoring are one switch: a file no anchor names is a picture nothing will ever ask for. Retention is the newest
+`OSC_WRAP_IMAGE_KEEP` (default 200) files, pruned by mtime, and pruning only ever touches names the relay wrote.
+
+Measured with `hack/live-pi-wrap.sh` (the real relay running inside a scratch tmux 3.6a pane, fed the bytes
+`hack/pi-image-bytes.mjs` says Pi prints for a 160x80 PNG, 160x52 client): the row reservation and the anchor land
+in the **pane's grid**, which is what a repaint redraws from - `reserve_rows` predicted 20 rows and the grid held
+**20 blank rows directly above the anchor line**; `capture-pane -p` still reported **1 anchor line** after a
+`copy-mode -e` round trip, after narrowing the pane to 90 columns, and after widening it back to 160, while the
+same pane's history held **0** copies of the image bytes. The asymmetry is the whole design: text is the one thing
+the grid keeps.
+
+One measurement corrected an assumption while building this: tmux *unwraps* the passthrough DCS. The bytes a client
+receives contain the original `ESC ]1337;` introducer and no `ESC Ptmux;`, which is expected - the wrapper exists
+for tmux's **input** side, to get a sequence through a server that has no handling for 1337 at all - but it means a
+byte-level probe of the client's stream cannot confirm the wrapper was used. Probe the pane side instead.
+
+
 ### The shape of the fix
 
-1. **Relay** (the pane's own side of the pipe): for every image it passes, write the decoded bytes to
-   `.slopyphus/images/<sha16>.png` in the pane's workdir, and emit a short anchor token into the grid where the
-   picture belongs, keeping the reserved rows so the text below still clears the picture.
+1. **Relay** (the pane's own side of the pipe): shipped as above.
 2. **ttyd fork**: a GET sibling of the upload endpoint that serves those files, restricted to the pane's own
    `.slopyphus/images/`, content-addressed names so `Cache-Control: immutable` is honest.
 3. **ttyd client**: an addon (the house already has `addons/overlay.ts` for drawing over the grid) holding a
@@ -640,12 +660,18 @@ default. ttyd fork d101262, `src/html.h` rebuilt by `hack/build-ttyd-client.sh`,
 ### Steps
 
 - [x] gate the browser context menu behind Ctrl/Meta (ttyd d101262, client bundle rebuilt, pinned a464d56)
-- [ ] live check of the gate through the front: CDP `contextmenu` without modifiers is `defaultPrevented`, with
-      `ctrlKey` it is not (`hack/front-cdp.mjs`)
-- [ ] relay: decode the payload, write `.slopyphus/images/<sha>.<ext>`, emit the anchor token, keep the row
-      reservation; extend `hack/test-osc-wrap-rows.py` to cover it
+- [x] live check of the gate through the front: CDP `contextmenu` without modifiers is `defaultPrevented` (true),
+      with `ctrlKey` or `metaKey` it is not (false), measured against the deployed image `4d3bd90` through
+      `hack/front-cdp.mjs`; the served bundle contains `enableContextMenuGate` (1 occurrence) and the option name
+      appears in ttyd's own startup log line
+- [x] relay: decode the payload, write `.slopyphus/images/<sha>.<ext>`, emit the anchor token, keep the row
+      reservation; extended `hack/test-osc-wrap-rows.py` (10 new checks, 45 total, including byte-identity of the
+      saved file, the hash-prefix naming, refresh-not-duplicate, and mtime pruning with the ages stated rather than
+      left to the clock). Off by default, so the shipped byte stream is unchanged - the byte-exactness check against
+      `hack/pi-image-bytes.mjs --wrap-tmux` still passes
 - [ ] ttyd fork: the GET endpoint, its path restriction, its cache headers, and a `hack/` probe that proves all three
 - [ ] client addon: anchor scan, image store, redraw on render/resize/scroll
+- [ ] turn the anchor on in the entrypoint, once the client understands it, so users never see a token with no picture
 - [ ] measure the outcome rather than the implementation: CDP screenshots showing the image still present after a
       wheel scroll, a collapsed-to-expanded pane, a tmux pane menu, and a client reattach
 - [ ] README (keyboard table, `PI_PANE_MODE`, what an image now is) and this plan updated with what was learned
@@ -659,7 +685,9 @@ default. ttyd fork d101262, `src/html.h` rebuilt by `hack/build-ttyd-client.sh`,
   loads it, and it is the source of the `1337`/IIP support in the shipped bundle). It is fed from the byte stream,
   so an anchor-driven draw needs either its own addon or a patch to that addon, not a reuse.
 - Where the images live across restarts: `.slopyphus/uploads/` already survives on the pane's volume, so
-  `.slopyphus/images/` should too, but the retention question (how many pictures one agent keeps) is unanswered.
+  `.slopyphus/images/` should too. Retention now has a default - the newest `OSC_WRAP_IMAGE_KEEP` (200) files,
+  pruned by mtime - which is a guess about how much history one agent wants and is worth revisiting once the
+  pictures are actually persistent.
 
 ## Validation recipe
 

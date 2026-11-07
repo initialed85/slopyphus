@@ -14,12 +14,15 @@ cursor for one. Two things have to be true for that to be worth shipping, and th
      they are quoted below as constants with their provenance, because a unit test cannot start a browser.
 """
 import base64
+import hashlib
 import importlib.util
 import math
 import os
+import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import zlib
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -184,6 +187,49 @@ check("an OSC 1337 that is not an image is still carried",
       osc_wrap.Rewriter(True, term_size=(100, 30)).feed(b"\x1b]1337;Framer=1\x07"),
       b"\x1bPtmux;\x1b\x1b\x1b]1337;Framer=1\x07\x1b\\")
 check("and it reserves no rows", osc_wrap.Rewriter(True, term_size=(100, 30)).stats["rows"], 0)
+
+tmp = tempfile.mkdtemp(prefix="osc-wrap-images-")
+osc_wrap.IMAGES_DIR = tmp  # the relay reads the constant at import, so a test patches the constant
+osc_wrap.IMAGE_KEEP = 3
+
+print("\nanchoring: the picture saved under the pane's directory, and the line of text that records where it goes")
+seq = payload("inline=1;width=40;height=auto", IMG)
+want_rows = osc_wrap.reserve_rows(seq, 100, 30)
+digest = hashlib.sha256(IMG).hexdigest()[:10]
+before = osc_wrap.Rewriter(True, term_size=(100, 30)).feed(seq)
+check("a relay with the anchor off - the shipped default - emits no anchor and saves nothing",
+      (b"[[img:" in before, os.listdir(tmp)), (False, []))
+
+r = osc_wrap.Rewriter(True, anchor=True, term_size=(100, 30))
+out = r.feed(seq)
+check("the anchor sits on the row below the reserved ones, dimmed and reset",
+      out.endswith(b"\r\n" * want_rows + b"\x1b[2m[[img:" + digest.encode() + b"]]\x1b[0m\r\n"), True)
+check("everything before the anchor is the same bytes the relay emitted without it", out[: len(before)], before)
+check("the saved file is byte-identical to the picture that was passed", open(os.path.join(tmp, digest + ".png"), "rb").read(), IMG)
+check("the id is a prefix of the content hash, so the same picture twice is one file", len(os.listdir(tmp)), 1)
+r.feed(seq)
+check("and feeding it twice refreshes rather than duplicates", (r.stats["anchors"], len(os.listdir(tmp))), (2, 1))
+
+for w, h in ((11, 7), (13, 5), (17, 3)):
+    osc_wrap.Rewriter(True, anchor=True, term_size=(100, 30)).feed(payload("inline=1;width=10", png(w, h)))
+names = sorted(os.listdir(tmp))
+check("four pictures in, IMAGE_KEEP=3 out", len(names), 3)
+# Which one a live relay would drop depends on wall-clock granularity - several writes in the same second tie -
+# so the retention rule is checked directly, with the ages stated rather than left to the clock.
+base = 1_700_000_000
+for i, name in enumerate(names):
+    os.utime(os.path.join(tmp, name), (base + i, base + i))
+osc_wrap.IMAGE_KEEP = 2
+osc_wrap.prune_images()
+check("pruning drops the oldest by mtime and keeps the rest", sorted(os.listdir(tmp)), sorted(names[1:]))
+
+bogus = payload("inline=1;width=10", b"not a picture at all, no magic bytes here")
+rb = osc_wrap.Rewriter(True, anchor=True, term_size=(100, 30))
+bout = rb.feed(bogus)
+check("an image whose size cannot be read gets no anchor: an unsized anchor is a picture drawn over text",
+      (b"[[img:" in bout, rb.stats["anchors"], rb.stats["rows"]), (False, 0, 0))
+check("and nothing is saved for it", len(os.listdir(tmp)), 2)  # three minus the one the retention check pruned
+shutil.rmtree(tmp)
 
 print()
 if fails:
