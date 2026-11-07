@@ -601,6 +601,66 @@ reservation moves with the constant rather than with the terminal. If a future c
 to tmux, the honest change is to ask tmux instead of carrying a constant.
 
 
+## Task 5 — make an inline image survive a repaint
+
+### First half shipped (07/11): the right click gate
+
+A right click was answered by two independent stacks at once. tmux's built-in
+`bind-key -T root MouseDown3Pane display-menu ...` (Horizontal Split, Vertical Split, Swap Up/Down, Swap Marked,
+Kill, Respawn, Mark, Zoom, and the same on `M-MouseDown3Pane`) reaches tmux through xterm.js's mouse reporting,
+and Chrome answers the `contextmenu` event as well, for the helper textarea xterm.js keeps inside the terminal.
+Now the browser menu only answers when Ctrl or Meta is held; `-t enableContextMenuGate=false` restores Chrome's
+default. ttyd fork d101262, `src/html.h` rebuilt by `hack/build-ttyd-client.sh`, pinned by slopyphus a464d56.
+
+### Why the picture goes away at all (measured, not inferred)
+
+- tmux never stores an inline image. In a scratch tmux 3.6 session, draw one wrapped OSC 1337 PNG into a pane,
+  then resize the pane and show a pane menu: `tmux capture-pane -p -e` reports **0** occurrences of `1337` in the
+  pane's history at every stage, while `pipe-pane` on that same pane shows the payload exactly once. tmux's grid
+  holds cells.
+- Therefore every repaint is lossy and permanent: `WheelUpPane -> copy-mode -e` reprints a history slice, a resize
+  or expand reprints the pane, `MouseDown3Pane`'s `display-menu` draws over it, a reattach reprints for the new
+  client. Only the application re-emitting restores it, which is exactly the "collapsed to expanded, some show and
+  some don't, mostly it figures it out" behaviour.
+- The relay cannot fix this on its own. It sits below tmux, and tmux reprints never pass through it.
+
+### The shape of the fix
+
+1. **Relay** (the pane's own side of the pipe): for every image it passes, write the decoded bytes to
+   `.slopyphus/images/<sha16>.png` in the pane's workdir, and emit a short anchor token into the grid where the
+   picture belongs, keeping the reserved rows so the text below still clears the picture.
+2. **ttyd fork**: a GET sibling of the upload endpoint that serves those files, restricted to the pane's own
+   `.slopyphus/images/`, content-addressed names so `Cache-Control: immutable` is honest.
+3. **ttyd client**: an addon (the house already has `addons/overlay.ts` for drawing over the grid) holding a
+   `sha -> ImageBitmap` map, scanning rendered buffer lines for the anchor token and drawing the stored image over
+   its reserved rows on every render, resize and scroll. Persistence then lives in a file and in the browser, and
+   the anchor is ordinary text that tmux already stores.
+4. Only after that works: decide whether to stop sending the inline burst at all, so there is no double draw.
+
+### Steps
+
+- [x] gate the browser context menu behind Ctrl/Meta (ttyd d101262, client bundle rebuilt, pinned a464d56)
+- [ ] live check of the gate through the front: CDP `contextmenu` without modifiers is `defaultPrevented`, with
+      `ctrlKey` it is not (`hack/front-cdp.mjs`)
+- [ ] relay: decode the payload, write `.slopyphus/images/<sha>.<ext>`, emit the anchor token, keep the row
+      reservation; extend `hack/test-osc-wrap-rows.py` to cover it
+- [ ] ttyd fork: the GET endpoint, its path restriction, its cache headers, and a `hack/` probe that proves all three
+- [ ] client addon: anchor scan, image store, redraw on render/resize/scroll
+- [ ] measure the outcome rather than the implementation: CDP screenshots showing the image still present after a
+      wheel scroll, a collapsed-to-expanded pane, a tmux pane menu, and a client reattach
+- [ ] README (keyboard table, `PI_PANE_MODE`, what an image now is) and this plan updated with what was learned
+
+### Open questions to settle while building
+
+- Anchor visible or invisible: a visible token is greppable, survives tmux's grid, and is honest about a picture
+  being there; an OSC-only anchor would not survive the repaint, which is the entire reason for putting it in the
+  grid. The visible token is the direction unless the front's owner objects to the extra line.
+- What draws it: `@xterm/addon-image` ^0.7.0 is what renders these pictures today (ttyd's `-t enableSixel=true`
+  loads it, and it is the source of the `1337`/IIP support in the shipped bundle). It is fed from the byte stream,
+  so an anchor-driven draw needs either its own addon or a patch to that addon, not a reuse.
+- Where the images live across restarts: `.slopyphus/uploads/` already survives on the pane's volume, so
+  `.slopyphus/images/` should too, but the retention question (how many pictures one agent keeps) is unanswered.
+
 ## Validation recipe
 
 ```sh
