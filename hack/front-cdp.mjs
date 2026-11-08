@@ -18,7 +18,11 @@
 // like success unless documentURI is read.
 //
 //   node hack/front-cdp.mjs --url http://192.168.1.213:38137/ [--expression-file f.js] [--wait-ms 3000]
-//                           [--shot out.png] [--width 1280] [--height 800] [--keep-tab]
+//                           [--shot out.png] [--width 1280] [--height 800] [--mobile] [--keep-tab]
+//
+// --mobile is the phone measurement: it sets the metrics override's mobile flag and enables touch, which
+// is what makes (pointer: coarse) match. Without it a 390-wide run is a narrow desktop window, which is
+// a real case the layout has to handle but not the one the font size keys on.
 //
 // Two more switches exist for the clipboard work, because both halves of it need them:
 //   --ignore-cert-errors            a ttyd started with -c/-k serves a self-signed certificate, and
@@ -246,7 +250,13 @@ if (captureConsole) {
   await send("Runtime.enable", {}, sessionId);
   await send("Log.enable", {}, sessionId);
 }
-await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false }, sessionId);
+await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: has("mobile") }, sessionId);
+// The two halves of "is this a phone" are separate overrides: the metrics flag changes what the page
+// reports for the viewport, and (pointer: coarse) - which is what a pane's font size keys on - only
+// becomes true when touch is enabled. Set both, or the measurement is of a phone with a mouse.
+if (has("mobile")) {
+  await send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 1 }, sessionId);
+}
 // Security.* is per target and has to be set before the navigation that would otherwise fail on a
 // self-signed certificate; Browser.grantPermissions is browser level, so it goes without a sessionId.
 if (has("ignore-cert-errors")) {

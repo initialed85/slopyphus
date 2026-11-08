@@ -27,6 +27,15 @@
 <html>
   <head>
     <meta charset="utf-8" />
+    <!--
+      Without this, a phone lays the page out at its default ~980px virtual viewport and then shrinks the
+      result to fit the screen, so at 390pt the whole desktop renders at ~0.4 scale: the tab strip's 22px
+      is 8px on the glass and the 12px terminal inside a pane is 5px. That is the complaint this answers.
+      The layout the page emits is a grid sized for a wide screen, so a phone also gets a different shape
+      from it (see the max-width block in slopyphus-desktop.css); the meta and that block are one change,
+      not two, and either alone is still unreadable.
+    -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>@@PAGE_TITLE@@</title>
     <link rel="stylesheet" href="/slopyphus-desktop.css" />
     <style>

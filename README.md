@@ -260,6 +260,44 @@ An agent may not be named `index`, `all`, `tab-<digits>`, anything ending in `.h
 proxy location and a static page sharing a path, which is the kind of collision only the person deploying
 it would notice, at the front, sometimes. The entrypoint refuses the name instead.
 
+## A phone
+
+The desktop is a grid sized for a wide screen and a phone has none of that. The fix is on both sides of the
+pane, and neither half works alone:
+
+- `index.html.template` carries `<meta name="viewport" content="width=device-width, initial-scale=1,
+  viewport-fit=cover">`. Without it a phone lays the page out at its own default (about 980px) and scales
+  the result into its 390pt screen, so the 22px tab strip is 8px on the glass and a pane's 12px terminal is
+  5px. That is the "four times too small" complaint, measured as a scale factor rather than guessed at.
+- The `max-width: 767px` block in `slopyphus-desktop.css` takes the grid out of `#wrap`, hands its cells back
+  with `display: contents`, and lays every pane on the page out as one screen-wide panel in a scroll-snap
+  row — the way between panes is a swipe. It is written that way rather than as a mobile grid on purpose:
+  the entrypoint decides each page's grid (`1fr 1fr`, `-rows`, or `1fr`) and the pane count is a knob, so
+  restating either here would be a second source of truth that can disagree with the first. A page holding
+  one pane and a page holding six behave the same, and the page's inline rule cannot fight it because flex
+  ignores `grid-template-*` outright. The strip becomes 46px so a tab is a thumb-sized target, and
+  `--tabs-h` — the number the expanded-pane rule insets by — is restated `!important` because the entrypoint
+  emits it in a `<style>` that loads after this file.
+- ttyd's client raises its own font size for a coarse pointer (`MOBILE_FONT_PX`, 16px, under
+  `vendor/ttyd/html/src/components/terminal/xterm`), because the agent containers ask for `-t fontSize=12`
+  and that is chosen for a desktop pane; 16px at 390pt is about 40 columns. The *pointer* is the trigger and
+  not the width, because the desktop grid makes every pane a ~60px cell and a rule keyed on the pane's width
+  would hand those cells three columns. It is applied last — after the server's options and after the pane
+  URL's query — so `?fontSize=12` on a pane URL is the escape hatch and the size is tunable per pane.
+
+Measured on the testbed, two panes to a page, 390x844 with touch enabled: `#wrap` is flex, each pane is 390px
+wide, the pane row's `scrollWidth` is 780 while the *document's* is 390 (so the desktop itself never gets a
+scrollbar), the strip is 46px and `--tabs-h` reads 46px. The same page at 1280x800 with a fine pointer is a
+grid, 640px per pane, 22px strip: nothing changed for a laptop. `hack/front-cdp.mjs --mobile` is the flag
+that makes the font half measurable at all — the viewport override alone produces a narrow *desktop* window,
+which is the layout case but not the pointer case.
+
+What a phone still does not get is stated rather than discovered later. Every pane on the page is loaded and
+attached, so a page of six panes is six websockets on mobile data; and `Alt+Shift+Enter` / `Alt+Shift+G` have
+no keys on a phone keyboard. What the terminal can *show* is a tmux question, not a CSS one: `.tmux.conf`
+sets `window-size largest`, so a phone attaching to a window a 248-column laptop is already watching sees
+the leftmost ~40 columns of it, and a phone gets its own width only when it is the widest client attached.
+
 ## Examples
 
 

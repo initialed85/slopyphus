@@ -180,3 +180,81 @@ body.iframe-expanded #wrap iframe.expanded {
   width: 100vw;
   height: calc(100vh - var(--tabs-h));
 }
+
+/*
+ * A phone: one pane at a time, and the way between panes is a swipe.
+ *
+ * The width is the trigger rather than pointer:coarse, because what the rule is for is a viewport that
+ * cannot hold six panes, and a narrow desktop window cannot hold them either. (The terminal's own font
+ * size does use the pointer, and it is set in ttyd's client: see MOBILE_FONT_PX there.)
+ *
+ * The desktop's shape is decided by the entrypoint, which emits one inline rule per page -
+ * #wrap { grid-template-columns: 1fr 1fr } or -rows, or 1fr - and the number of panes per page is a
+ * knob (PANES_PER_TAB). None of that is knowable here, so the mobile block does not try to restate it:
+ * it takes the grid out of #wrap, hands the cells back to #wrap with display: contents, and lays every
+ * pane on the page out as a screen-wide panel in one scrollable row. A page holding one pane and a page
+ * holding six both get the same behaviour, and the inline rule cannot disagree with it because flex
+ * ignores grid-template-* entirely.
+ *
+ * Why a swipe rather than a pane selector: it needs no script, no state and no new markup, which is the
+ * same reason the tab strip is a row of links. What it costs is that every pane on the page is loaded
+ * and attached to its tmux at once, so a phone on mobile data opens six websockets. The alternative
+ * (one iframe per page, lazily) is a different desktop, not a stylesheet.
+ */
+@media (max-width: 767px) {
+  html,
+  body {
+    /* The strip is 46px here so a tab is a thumb-sized target, and the expanded pane has to start below
+       it. !important because the entrypoint emits `body { --tabs-h: 22px }` in a <style> that follows
+       this file's <link>, and a later rule of the same specificity wins: the custom property would
+       otherwise be 22px while the strip it insets by is 46px. */
+    --tabs-h: 46px !important;
+  }
+
+  #tabs {
+    flex: 0 0 46px;
+    gap: 4px;
+    padding: 0 6px;
+    overflow-x: auto;
+    /* The hint is the pane names, which a phone reads off the panes themselves; on a 390pt strip it is
+       the thing that squeezes the tabs to nothing. */
+  }
+  #tabs a {
+    /* 46px tall, 15px type: the smallest touch target worth offering and the size at which the numbers
+       are readable without zooming. */
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    height: 34px;
+    padding: 0 14px;
+    font-size: 15px;
+  }
+  #tabs .hint {
+    display: none;
+  }
+
+  #wrap {
+    display: flex;
+    align-items: stretch;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scroll-snap-type: x mandatory;
+  }
+  /* The group stops being a box, so its cells are #wrap's items and the page's inline grid rule is
+     inert. visibility: inherited on the strip's rules still reaches them (see body.iframe-expanded). */
+  .group {
+    display: contents;
+  }
+  .cell {
+    flex: 0 0 100%;
+    scroll-snap-align: start;
+  }
+  .tag {
+    font-size: 14px;
+    padding: 1px 5px;
+    /* A pane is the whole screen here, so the label is worth a real background rather than a scrim over
+       the terminal's first line. */
+    background: rgba(17, 17, 17, 0.9);
+  }
+}
+

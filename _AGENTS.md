@@ -102,6 +102,13 @@ container are output, not source- edit the template or the environment, never th
   rules that make that true are load-bearing: `iframe { display: block }`, a pane label clipped to its pane,
   and the style the script injects into every same-origin pane. A scrollbar hidden without its area given
   back (old `::-webkit-scrollbar { display: none }`) is the failure this replaced, not the fix.
+- A phone is a stylesheet and a client option, not a renderer branch: the viewport meta in
+  `index.html.template`, the `max-width: 767px` block in `slopyphus-desktop.css` (one swipeable pane per
+  screen), and `MOBILE_FONT_PX` in the vendored client. `docker-entrypoint.nginx.sh` must not learn that a
+  phone exists- the same rendered page is both desktops. The terminal's own font size is the one thing a
+  phone cannot be given from here, and it lives in the client rather than in a pane's URL because a URL is
+  chosen by the front and the front cannot know the device. `disableLeaveAlert` above is the contrast: that
+  one *is* a query parameter, because it is true of the pane and not of the person looking at it.
 - How the desktop looks is checked in `hack/front-testbed.sh` (working-tree templates as a live container)
   and `hack/front-cdp.mjs` (CDP against the shared Chromium, which can wait for a pane to build its own UI).
   Reproduce a layout with panes that are *names* pointing at `https://example.com`; do not point a headless
@@ -119,7 +126,15 @@ are pinned by commit, not by branch, so `git submodule update --init --recursive
   the submodule here. Never hand-edit `html.h`, and never edit the rendered copy inside a container.
 - The image build runs no node toolchain: it compiles the committed header. A client change that has not
   been regenerated and committed in the fork is therefore invisible in the image, which is the failure
-  mode to watch for when a terminal change "does not deploy".
+  mode to watch for when a terminal change "does not deploy". `.woodpecker/ci.yaml` gates it: every marker
+  it lists has to appear in the source *and* in `html.h`, so the marker for a new client behaviour is the
+  log line it prints (`console.log('[ttyd] ... ')`, one literal- a template expression is not greppable
+  after the bundle is built).
+- A pane's options have a merge order, and it is the thing to know before adding one: the client's own
+  defaults, then the server's `-t` options (`ttyd -t fontSize=12` in `docker-entrypoint.sh`), then whatever
+  `parseOptsFromUrlQuery` returns. A value synthesised in that function is therefore the last word, which
+  is how a device-dependent default (a phone's font size) survives a server option that was chosen for a
+  desktop while `?fontSize=12` in the pane URL still overrides it.
 - `ttyd --version` must say `1.7.7-slopyphus`. The suffix is a hunk in the fork's `CMakeLists.txt`, and
   both the `Dockerfile` builder stage and `.woodpecker/ci.yaml` assert it, so a rebase onto upstream that
   drops it fails the build.

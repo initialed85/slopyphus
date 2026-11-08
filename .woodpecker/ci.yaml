@@ -96,7 +96,7 @@ steps:
       # 'Shift+Enter -> newline enabled' is the keystroke mapping; both are things a front page cannot
       # provide for a pane it only frames, which is the reason ttyd is forked at all.
       - |
-        for marker in 'fallback clipboard copy failed' 'malformed OSC 52 payload' 'Shift+Enter -> newline'; do
+        for marker in 'fallback clipboard copy failed' 'malformed OSC 52 payload' 'Shift+Enter -> newline' 'mobile font size'; do
           grep -qF "$marker" vendor/ttyd/html/src/components/terminal/xterm/index.ts \
             || { echo "FAIL: $marker is missing from the client source"; exit 1; }
           grep -qF "$marker" /tmp/client-bundle.js \
@@ -164,6 +164,17 @@ steps:
       - "grep -qF 'try_files /tab-1.html =404;' /tmp/rendered/default.conf"
       - "grep -qF 'location = /index.html {' /tmp/rendered/default.conf"
       - "grep -qF 'index tab-1.html;' nginx.conf.template"
+      # A phone gets the viewport it asked for. Without this meta, iPhone Safari lays the page out at its
+      # ~980px default and scales the result into 390pt, so the 22px tab strip is 8px on the glass and a
+      # pane's 12px terminal is 5px - which is the "everything is four times too small" complaint. The
+      # meta alone is not the fix either (a phone then gets six 65px panes), so the assertion is a pair:
+      # the meta here, and the max-width block in the stylesheet the page links.
+      - "grep -qF 'name=\"viewport\" content=\"width=device-width, initial-scale=1' /tmp/rendered/tab-1.html"
+      # The mobile shape is CSS, not a rendered thing, so the assertion reads the checkout; the two
+      # strings are the load-bearing parts of it - the trigger, and the trick that makes a page's inline
+      # grid rule inert without restating it.
+      - "grep -qF '@media (max-width: 767px)' slopyphus-desktop.css"
+      - "grep -qF 'display: contents' slopyphus-desktop.css"
       # Served, not redirected: a `return` builds an absolute URL out of $server_name and $server_port, and
       # the front testbed measured one sending a browser from a NodePort-style 38137 to port 80.
       - "grep -qF 'location = /tab-2 {' /tmp/rendered/default.conf"
