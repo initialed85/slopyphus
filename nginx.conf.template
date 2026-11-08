@@ -11,6 +11,20 @@ server {
   listen 80;
   server_name _;
 
+  # Redirects are relative, because this front is always behind something that terminates TLS. Inside
+  # the container $scheme is http whatever the browser used, and an absolute Location would rewrite
+  # https://host/x to http://host/x. Measured on the dev cluster: `return 308 /home-ops/` answered
+  # `Location: http://slopyphus.dev.initialed85.cc/home-ops/` even with X-Forwarded-Proto: https, and a
+  # 308 is cacheable, so the browser kept re-entering over plain http. The oauth2-proxy session and
+  # CSRF cookies are Secure, so on http they are neither sent nor stored: the pane demanded a sign-in,
+  # and that sign-in then died at the callback with "Cookies were found in OAuth callback, but none was
+  # a CSRF cookie". A relative Location is resolved against the URL the browser is already on, so the
+  # scheme the user arrived with survives.
+  absolute_redirect off;
+  # Same reason, for the container's own port: a bare name keeps the redirect on whatever the client
+  # used rather than leaking 80 (or a NodePort) into a URL.
+  port_in_redirect off;
+
   root /usr/share/nginx/html;
   # The front no longer renders an index.html: tab 1 is tab-1.html like every other tab, and the entrypoint
   # removes any index.html left behind (nginx's own welcome page included). This directive is the belt; the

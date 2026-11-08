@@ -169,6 +169,15 @@ steps:
       - "grep -qF 'location = /tab-2 {' /tmp/rendered/default.conf"
       - "grep -qF 'try_files /tab-2.html =404;' /tmp/rendered/default.conf"
       - "grep -qF 'location = /all {' /tmp/rendered/default.conf"
+      # The redirects that cannot be served (a pane's location is a proxy prefix, so it has to redirect)
+      # are made relative by the template. The dev cluster measured why: a `return 308 /home-ops/` from
+      # behind Traefik answered `Location: http://slopyphus.../home-ops/`, a 308 is cacheable, and the
+      # oauth2-proxy session and CSRF cookies are Secure, so the trip to plain http both dropped the
+      # session and made the next sign-in unfinishable. Asserting the directive and the shape of every
+      # redirect target is what keeps a later edit from writing one out in full.
+      - "grep -qF 'absolute_redirect off;' /tmp/rendered/default.conf"
+      - "grep -qF 'port_in_redirect off;' /tmp/rendered/default.conf"
+      - "if grep -qE 'return 3[0-9][0-9] https?://' /tmp/rendered/default.conf; then echo 'FAIL: a redirect target is written as an absolute URL'; exit 1; fi"
       - "nginx -t -c /tmp/nginx.conf"
       # Scrollbars. This is the thing the desktop is judged on: a bar on the desktop itself costs a strip
       # of every pane's width at once, and a bar inside a pane eats part of that pane. Three causes, all
