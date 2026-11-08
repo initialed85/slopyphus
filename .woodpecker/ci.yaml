@@ -92,11 +92,13 @@ steps:
       # String literals survive minification, call sites do not, so the markers are messages the client
       # logs rather than identifiers - and a marker has to be a single literal, not a phrase a template
       # expression assembles at runtime, which is why this one stops at the arrow rather than quoting the
-      # whole log line. 'fallback clipboard copy failed' is the OSC 52 clipboard path and
-      # 'Shift+Enter -> newline enabled' is the keystroke mapping; both are things a front page cannot
-      # provide for a pane it only frames, which is the reason ttyd is forked at all.
+      # whole log line. 'mobile font size' and 'mobile touch scroll enabled' are the two phone rules - a
+      # pane picks its own font size, and a vertical swipe becomes the pane's wheel - and both are decisions
+      # a front page cannot make for a pane it only frames. 'fallback clipboard copy failed' is the OSC 52
+      # clipboard path and 'Shift+Enter -> newline enabled' is the keystroke mapping; both are things a
+      # front page cannot provide for a pane it only frames, which is the reason ttyd is forked at all.
       - |
-        for marker in 'fallback clipboard copy failed' 'malformed OSC 52 payload' 'Shift+Enter -> newline' 'mobile font size'; do
+        for marker in 'fallback clipboard copy failed' 'malformed OSC 52 payload' 'Shift+Enter -> newline' 'mobile font size' 'mobile touch scroll enabled'; do
           grep -qF "$marker" vendor/ttyd/html/src/components/terminal/xterm/index.ts \
             || { echo "FAIL: $marker is missing from the client source"; exit 1; }
           grep -qF "$marker" /tmp/client-bundle.js \

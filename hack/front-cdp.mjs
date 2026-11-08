@@ -18,6 +18,7 @@
 // like success unless documentURI is read.
 //
 //   node hack/front-cdp.mjs --url http://192.168.1.213:38137/ [--expression-file f.js] [--wait-ms 3000]
+//                           [--swipe "x,y,dx,dy"] [--wheel "x,y,dx,dy"] [--measure-file f.js] [--key "..."]
 //                           [--shot out.png] [--width 1280] [--height 800] [--mobile] [--keep-tab]
 //
 // --mobile is the phone measurement: it sets the metrics override's mobile flag and enables touch, which
@@ -108,6 +109,26 @@ const paneSelector = arg("pane-selector", "");
 const dropX = Number(arg("drop-x", 0));
 const dropY = Number(arg("drop-y", 0));
 const fileSettleMs = Number(arg("file-settle-ms", 2000));
+
+// Gesture actions, in the order they were given, each one "x,y,dx,dy" in CSS pixels from the viewport's
+// top left: a drag from (x,y) to (x+dx,y+dy). Both go through Chrome's input pipeline rather than as
+// events constructed in the page, because the question a gesture answers is which *consumer* the browser
+// hands it to - a pane's tmux, the desktop's snap scroller, or nobody - and that is decided by Chrome,
+// not by JavaScript. --swipe needs --mobile (without touch emulation the page reports a fine pointer and
+// a phone's rules never apply); --wheel is the same gesture as a laptop's mouse wheel, which is what
+// tells a phone's own problem apart from one that has been there for every device.
+const gestureSpecs = [];
+for (let i = 0; i < process.argv.length; i++) {
+  if (process.argv[i] === "--swipe") gestureSpecs.push({ kind: "swipe", spec: process.argv[i + 1] });
+  if (process.argv[i] === "--wheel") gestureSpecs.push({ kind: "wheel", spec: process.argv[i + 1] });
+}
+const swipeSteps = Number(arg("swipe-steps", 8));
+const swipeGapMs = Number(arg("swipe-gap-ms", 40));
+const wheelNotches = Number(arg("wheel-notches", 8));
+
+// Evaluated after the page has settled but before anything is done to it, so a run can hold a "before"
+// and an "after" in one connection: what a gesture changed is only measurable against what was there first.
+const measureFile = arg("measure-file", "");
 // --capture-console: ttyd's client says things ("pane upload refused: … limit …"), and those words are
 // the only window into the browser half of a failure. Runtime.consoleAPICalled covers the page and every
 // frame in it, including a pane's iframe.
@@ -290,6 +311,14 @@ const outcome = { targetId: target.targetId, tab: target.reused, tabsBefore, tab
 outcome.load = await loaded;
 await new Promise((r) => setTimeout(r, waitMs)); // xterm, websockets and lazy layout are not load events
 
+if (measureFile) {
+  const expression = readFileSync(measureFile, "utf8");
+  const result = await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true }, sessionId);
+  outcome.before = result.exceptionDetails
+    ? { error: result.exceptionDetails.exception?.description ?? JSON.stringify(result.exceptionDetails) }
+    : result.result?.value ?? null;
+}
+
 // Keys go through Chrome's input pipeline, so a press produces keydown, keypress (when the key carries
 // text) and keyup the way a physical keyboard does. Focus first: Chrome delivers key events to the focused
 // element, and a headless page has nothing focused.
@@ -318,6 +347,45 @@ if (keySpecs.length) {
     if (text) await send("Input.dispatchKeyEvent", { type: "char", ...base, text }, sessionId);
     await send("Input.dispatchKeyEvent", { type: "keyUp", ...base }, sessionId);
     await new Promise((r) => setTimeout(r, keyGapMs));
+  }
+}
+
+if (gestureSpecs.length) {
+  outcome.gestures = [];
+  for (const gesture of gestureSpecs) {
+    const n = gesture.spec.split(/[ ,]+/).map(Number);
+    if (n.length !== 4 || n.some(Number.isNaN)) throw new Error(`--${gesture.kind} needs "x,y,dx,dy": got '${gesture.spec}'`);
+    const [x, y, dx, dy] = n;
+    const record = { kind: gesture.kind, from: [x, y], to: [x + dx, y + dy] };
+    if (gesture.kind === "wheel") {
+      // A notch is what a wheel click is: 100px of DOM_DELTA_PIXEL, which is the magnitude Chrome
+      // reports for one click of a physical wheel. Notches are separate events, because that is how a
+      // wheel arrives - a discrete click per notch - unlike a finger, which is continuous.
+      record.notches = wheelNotches;
+      for (let i = 0; i < wheelNotches; i++) {
+        await send("Input.dispatchMouseEvent", { type: "mouseWheel", x, y, deltaX: 0, deltaY: dy / wheelNotches }, sessionId);
+        await new Promise((r) => setTimeout(r, swipeGapMs));
+      }
+    } else {
+      const steps = Math.max(1, swipeSteps);
+      record.steps = steps;
+      await send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] }, sessionId);
+      for (let i = 1; i <= steps; i++) {
+        await send(
+          "Input.dispatchTouchEvent",
+          {
+            type: "touchMove",
+            touchPoints: [{ x: Math.round(x + (dx * i) / steps), y: Math.round(y + (dy * i) / steps) }],
+          },
+          sessionId,
+        );
+        await new Promise((r) => setTimeout(r, swipeGapMs));
+      }
+      // touchEnd carries no points: the finger leaving is not a location.
+      await send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] }, sessionId);
+    }
+    outcome.gestures.push(record);
+    await new Promise((r) => setTimeout(r, swipeGapMs * 4));
   }
 }
 
