@@ -105,6 +105,12 @@ steps:
             || { echo "FAIL: vendor/ttyd/src/html.h is stale: the source has '$marker' and the shipped header does not. Run hack/build-ttyd-client.sh and commit the header in the fork."; exit 1; }
           echo "client feature ships: $marker"
         done
+      # The viewport meta is a different kind of marker: it lives in the client's HTML template rather
+      # than in a script, and it is the thing that makes every other phone rule arrive at the size it was
+      # chosen for. Without it a phone lays a direct agent URL out at 980px and shrinks it to ~0.4 scale,
+      # so the font and the swipe below are present and correct and still look like they are missing.
+      - "grep -qF 'width=device-width' vendor/ttyd/html/src/template.html || { echo 'FAIL: the client template has no viewport meta'; exit 1; }"
+      - "grep -qF 'width=device-width' /tmp/client-bundle.js || { echo 'FAIL: vendor/ttyd/src/html.h is stale: the template has a viewport meta and the shipped header does not'; exit 1; }"
 
   - name: render-front-config
     image: docker.io/library/nginx:alpine
