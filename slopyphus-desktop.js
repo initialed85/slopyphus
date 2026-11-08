@@ -11,7 +11,7 @@
  *   - tracks which pane the pointer is over, so the focus ring and the shortcuts know what is being
  *     looked at;
  *   - the Alt+Shift+Enter (expand one pane to the viewport) and Alt+Shift+G (broadcast keys to every
- *     pane on this page) chords;
+ *     pane on this page) chords, and the keystroke relay itself (keydown, keypress, keyup);
  *   - injects the scrollbar rule into each pane's own document, which is only possible because every
  *     upstream is proxied through this front and is therefore same-origin.
  *
@@ -102,6 +102,14 @@ function dispatchKeyboard(frame, type, init, relayed = false) {
     const target = frame.contentDocument.querySelector(".xterm-helper-textarea");
     if (!target) return;
     const event = new KeyboardEvent(type, init);
+    // charCode is the one field a keypress is read out of and the constructor cannot carry it: it is a
+    // deprecated read-only attribute, not a member of KeyboardEventInit, so a plain init is silently
+    // ignored. xterm's _keyPress then falls through every branch (charCode 0, which set but charCode 0)
+    // and returns false, and the character is lost. keyCode and which do not need this because the
+    // browser derives them from key+code.
+    if (type === "keypress" && typeof init.charCode === "number" && init.charCode > 0) {
+      Object.defineProperty(event, "charCode", { value: init.charCode });
+    }
     if (relayed) relayedKeyEvents.add(event);
     target.dispatchEvent(event);
   } catch (_) {
@@ -138,6 +146,12 @@ function relayKeyboard(event, sourceFrame) {
     isComposing: event.isComposing,
     keyCode: event.keyCode,
     which: event.which,
+    // Read from the source event and set by hand on the way out (see dispatchKeyboard). Without it the
+    // broadcast delivers every key but the ones xterm only resolves from a keypress: a plain space
+    // (keyCode 32, below the >= 48 gate in Keyboard.ts's printable fallback) and uppercase A-Z (which
+    // Terminal.ts deliberately defers to keypress for a macOS IME bug). That is the whole of the
+    // "broadcast loses the space bar" report.
+    charCode: event.charCode,
     bubbles: true,
     cancelable: true,
     composed: true,
@@ -201,7 +215,11 @@ function bindFrameDocument(frame) {
     ["pointerover", "pointermove", "pointerdown"].forEach((type) => {
       frameDocument.addEventListener(type, () => setActiveFrame(frame), true);
     });
-    ["keydown", "keyup"].forEach((type) => {
+    // keypress is relayed rather than synthesised because the browser itself decides which keys get
+    // one: xterm preventDefaults the keydown of anything it can translate there (lowercase letters,
+    // digits, punctuation), and no keypress fires for those. Relaying only the keypresses that really
+    // happen is what keeps the space and uppercase fixes from double-sending the rest of the alphabet.
+    ["keydown", "keypress", "keyup"].forEach((type) => {
       frameDocument.addEventListener(type, (event) => handleFrameKeyboard(event, frame), true);
     });
     styleFrameDocument(frame);
@@ -233,6 +251,6 @@ document.addEventListener(
   },
   true
 );
-["keydown", "keyup"].forEach((type) => {
+["keydown", "keypress", "keyup"].forEach((type) => {
   document.addEventListener(type, (event) => handleFrameKeyboard(event, null), true);
 });

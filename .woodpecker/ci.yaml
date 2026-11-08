@@ -218,6 +218,14 @@ steps:
       - "awk '/^html,/,/^}/' slopyphus-desktop.css | grep -q 'overflow: hidden'" # the desktop cannot scroll, so it cannot show a bar
       - "test $(grep -cF '::-webkit-scrollbar{width:0!important;height:0!important}*{scrollbar-width:none!important}' slopyphus-desktop.js) = 1" # the rule injected into every pane
       - "test $(grep -cF 'slopyphus-pane-scrollbars' slopyphus-desktop.js) = 1" # the style element it is injected as
+      # The broadcast relay's keystroke set. A plain space and uppercase A-Z are the two printables xterm
+      # cannot translate from a keydown (Keyboard.ts's printable fallback needs keyCode >= 48, and
+      # Terminal.ts defers A-Z to keypress), so they arrive as a keypress that the relay has to forward -
+      # and charCode, the field that keypress is read out of, is not a KeyboardEventInit member, so it is
+      # defined by hand. Measured live in hack/front-keys-session.mjs: before this, three broadcast panes
+      # received `a b e f` from the same keystrokes the focused pane received as `a b C D e f`.
+      - "test $(grep -cF '\"keydown\", \"keypress\", \"keyup\"' slopyphus-desktop.js) = 2" # the relay, and the page's own listeners
+      - "grep -qF 'Object.defineProperty(event, \"charCode\"' slopyphus-desktop.js"
       # Every page links both assets, and the names linked are the names the image copies. This pair of
       # greps exists because the first run of the tabs work rendered a page linking /slopyphus-desktop.css
       # while the directory held desktop.css: an unstyled skeleton of 300x150 iframes, which measures like a
