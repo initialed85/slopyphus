@@ -100,7 +100,9 @@ import tty
 
 INTRO = b"\x1b]1337;"
 MAX_HOLD = 64 * 1024 * 1024
-IDLE_S = 1.5
+# How long a partial OSC 1337 may sit before we concede it is not going to complete. Signals now wake the loop
+# themselves (see the self-pipe in main), so this only bounds unfinished image sequences and can be short.
+IDLE_S = 0.1
 READ_SIZE = 65536
 
 # The two quantities a pane cannot report about itself: the aspect of one cell, and how tall a cell is in CSS
@@ -246,6 +248,26 @@ class Rewriter:
         out = bytes(self.buf)
         self.buf = bytearray()
         return out
+
+
+def ready(fd: int) -> bool:
+    """Is this fd readable right now? The guard a non-blocking read needs: select's answer goes stale between
+    answering and reading (two signals coalescing into one wake byte is enough), and a non-blocking read then
+    raises BlockingIOError rather than returning b"" - which killed the relay on its first resize. One extra
+    select per fd is cheap and makes the drain total."""
+    r, _, _ = select.select([fd], [], [], 0)
+    return fd in r
+
+
+def drain(fd: int) -> bytes:
+    """Read everything buffered on a non-blocking fd without letting the exhaustion read raise."""
+    got = b""
+    while ready(fd):
+        n = os.read(fd, READ_SIZE)
+        if not n:
+            break
+        got += n
+    return got
 
 
 def write_all(fd: int, data: bytes):
@@ -593,11 +615,36 @@ def main():
         except ProcessLookupError:
             pass
 
+    # A signal handler alone is not enough: from Python 3.5 (PEP 475) an interrupted syscall is retried inside
+    # the interpreter, so select() sitting on a 1.5 s timeout does NOT come back when SIGWINCH lands. Measured on
+    # this stack (python 3.14.4, /tmp/sigtest2.py): the handler ran and select still returned [] after 1601 ms.
+    # That made every pane resize wait a whole idle timeout for its new size - one resize, 1.5 s; a browser resize
+    # drag, which hands tmux a dozen intermediate sizes, minutes. The fix is the self-pipe: the handler writes a
+    # byte, the pipe is one of select's read fds, so a signal ends the wait immediately.
+    wake_r, wake_w = os.pipe()
+    fcntl.fcntl(wake_r, fcntl.F_SETFL, os.O_NONBLOCK)
+
+    def wake():
+        try:
+            os.write(wake_w, b"\x01")
+        except OSError:
+            pass
+
     def winch(_signum, _frame):
         state["winch"] = True
+        wake()
+
+    def forwarded(signum):
+        def handler(_signum, _frame):
+            try:
+                os.kill(child, signum)
+            except ProcessLookupError:
+                pass
+            wake()
+        return handler
 
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGQUIT, signal.SIGHUP):
-        signal.signal(sig, forward)
+        signal.signal(sig, forwarded(sig))
     signal.signal(signal.SIGWINCH, winch)
 
     rw = Rewriter(enable, reserve=reserve, anchor=anchor, inline=inline, term_size=pane_size())
@@ -612,34 +659,41 @@ def main():
             except OSError:
                 pass
         try:
-            r, _, _ = select.select([0, master], [], [], IDLE_S)
+            r, _, _ = select.select([0, master, wake_r], [], [], IDLE_S)
         except OSError as exc:
             if exc.errno == errno.EINTR:
                 continue
             raise
-
-        if master in r:
+        # stdin (the pane's input), master (the child's output) and wake_r (a signal landed) are all drained in
+        # turn rather than branch-by-branch: a SIGWINCH that arrives while a burst of the child's output is moving
+        # would otherwise wait for that branch to finish before its new size was noticed.
+        while ready(master):
             try:
                 data = os.read(master, READ_SIZE)
             except OSError:
                 data = b""
-            if data:
-                out = rw.feed(data)
-                if out:
-                    write_all(1, out)
-                continue
-            closed = True
+            if not data:
+                closed = True
+                break
+            out = rw.feed(data)
+            if out:
+                write_all(1, out)
+        if closed:
             break
-        if 0 in r:
+        while ready(0):
             try:
                 data = os.read(0, READ_SIZE)
             except OSError:
                 data = b""
-            if data:
-                write_all(master, data)
-                continue
-            # The pane's input side closed; the child will usually follow it.
+            if not data:
+                # The pane's input side closed; the child will usually follow it.
+                closed = True
+                break
+            write_all(master, data)
+        if closed:
             break
+        if wake_r in r:
+            drain(wake_r)
         # select timed out: nothing is moving, so stop holding a partial sequence.
         held = rw.idle()
         if held:
