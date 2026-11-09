@@ -81,6 +81,10 @@ RUN pi install https://github.com/initialed85/rooter
 RUN bash -c 'curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" && mv kubectl /usr/local/bin/ && chmod +x /usr/local/bin/kubectl'
 
 COPY .tmux.conf /root/.tmux.conf
+# tmux-smooth-scroll (github.com/azorng/tmux-smooth-scroll), vendored with one patch to src/init.sh - see
+# the comment there. It is in the repo rather than cloned at build time because the build must be
+# reproducible without a network fetch of a third party's main branch, and there is no TPM in this image.
+COPY tmux-smooth-scroll /usr/local/share/tmux-smooth-scroll
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 
 # The fork's binary, at the same path apt would have used, so anything that resolves `ttyd` by name
