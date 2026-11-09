@@ -706,8 +706,14 @@ def main():
         except OSError:
             pass
 
-    termios.tcsetattr(0, termios.TCSADRAIN, saved_in)
-    termios.tcsetattr(1, termios.TCSADRAIN, saved_out)
+    # Restoring the terminal is courtesy, not necessity, and it is not always possible: when the relay exits
+    # because its pane was killed, the tty it inherited is already gone and tcsetattr raises EIO. Seen doing exactly
+    # that on a live pod (termios.error: (5, 'Input/output error')) while a window was being torn down.
+    for fd, saved in ((0, saved_in), (1, saved_out)):
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+        except termios.error:
+            pass
     try:
         os.close(master)
     except OSError:
