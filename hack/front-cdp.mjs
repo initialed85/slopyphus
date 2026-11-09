@@ -129,6 +129,10 @@ const wheelNotches = Number(arg("wheel-notches", 8));
 // Evaluated after the page has settled but before anything is done to it, so a run can hold a "before"
 // and an "after" in one connection: what a gesture changed is only measurable against what was there first.
 const measureFile = arg("measure-file", "");
+// The counterpart of --measure-file. --expression-file is evaluated *after* the file actions, so a gesture
+// measurement needs a read that runs immediately after the gestures: install the listener with
+// --measure-file, swipe, and count what arrived with --post-measure-file.
+const postMeasureFile = arg("post-measure-file", "");
 // --capture-console: ttyd's client says things ("pane upload refused: … limit …"), and those words are
 // the only window into the browser half of a failure. Runtime.consoleAPICalled covers the page and every
 // frame in it, including a pane's iframe.
@@ -387,6 +391,14 @@ if (gestureSpecs.length) {
     outcome.gestures.push(record);
     await new Promise((r) => setTimeout(r, swipeGapMs * 4));
   }
+}
+
+if (postMeasureFile) {
+  const expression = readFileSync(postMeasureFile, "utf8");
+  const result = await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true }, sessionId);
+  outcome.after = result.exceptionDetails
+    ? { error: result.exceptionDetails.exception?.description ?? JSON.stringify(result.exceptionDetails) }
+    : result.result?.value ?? null;
 }
 
 if (fileActions.length) {
