@@ -148,6 +148,45 @@ are pinned by commit, not by branch, so `git submodule update --init --recursive
   repository. Repo-local on purpose: the identity belongs to the commits, and a global setting would follow
   the machine rather than the repo.
 
+# Agent memory (cognee graph, and pi-ed's Postgres)
+
+Memory arrives from `pi-ed`: the `Dockerfile` installs it and `docker-entrypoint.sh` runs
+`pi update --extensions` at container start, so a pushed extension reaches a pod on roll. Nothing in this
+repository implements memory and no fork of one belongs here. As of 2026-11-10 the fleet runs **both doors**,
+and the tools never overlap, so an agent always knows which store it is addressing:
+
+- `memory_remember` / `memory_recall` / `/cognee` address cognee's graph. The corpus is `fleet-ops`, carried in
+  Secret `cognee-agent-keys` (keys `api-key` and `dataset`) mounted as a **directory** at `/run/secrets/cognee`
+  rather than by `subPath`, which is what makes a key rotation a Secret edit instead of a re-roll.
+- `memory_search` / `memory_dream` address pi-ed's Postgres store via `PI_MEMORY_DSN` (namespace `pi-ed`). It
+  is the recall path of record until cognee's retrieval is proven; `PI_MEMORY_DISABLED=1` is the off switch.
+
+What has been measured, because an agent should not have to rediscover any of it:
+
+- Cognee's weak axis is **retrieval**, not its composing model. A fact verified in the stored bytes of
+  `home-ops`' corpus (`71.3 GiB`, `incomplete`) is returned by neither `CHUNKS` nor `CHUNKS_LEXICAL` at
+  `top_k` 3, 10, 20 or 50. And `top_k` above 10 does nothing at all: the door caps at ten chunks and answers
+  byte-identically above it, so asking harder is not diligence.
+- Cognee **reads** through the outage that stopped it writing — unscoped `CHUNKS` answered 200 in 250–480 ms
+  with relevant chunks while no embedder was schedulable anywhere. It is blind to the future, not to the past.
+- A recall answer is retrieved *and then re-composed*. `graph` and `hybrid` modes cost a 10–25 s synthesis by a
+  small local model (a 4B gemma in namespace `sentiment-analyzer`) that answers plausibly whether or not the
+  corpus holds the fact, and whose refusal template echoes the question back — so a one-line answer is a
+  failure, not a hit. **Never quote a completion mode as a stored sentence.** The default `chunks` mode returns
+  verbatim stored text and is the only thing worth citing.
+- A timeout means "we stopped waiting", never "nothing was remembered": a write that aborted still landed, and
+  cognee serves one worker, so an in-flight `cognify` blocks reads outright. Assume the first call after a pod
+  start is ~74 s of model loading and that is not a fault.
+- Writes stay foreground. `run_in_background=true` answers 200 in ~140 ms having stored nothing — measured 24
+  of 24 times, and again by a check whose row counter read 0 → 0.
+
+Anything written into `fleet-ops` is permanent and every agent will read it. Use a fresh marker per test
+(`slopy-redstart-7412` is a memory now, so it can never be a control again), write probes into a `*-probe`
+dataset rather than the shared one, and redact on the way out with pi-ed's `lib/redact.ts` rather than a second
+rule list — dreams are exactly the prose that quotes DSNs. Acceptance on this API is readback only: a marker
+written now must be found again *and* `/data/count` must move, because a status code is telemetry here, never
+proof.
+
 # Reusable services
 
 See `/root/.pi/agent/SERVICES.md` for reusable services
