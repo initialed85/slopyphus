@@ -18,12 +18,13 @@ pushd "/workspace/${NAME}"
 
 touch /docker-entrypoint-hook.sh >/dev/null 2>&1 || true
 
+bash -lic 'pi update'
+
 if ! bash /docker-entrypoint-hook.sh; then
 	echo "error: failed to run /docker-entrypoint-hook.sh"
 	exit 1
 fi
 
-bash -lic 'pi update'
 bash -lic 'pi update --extensions'
 
 # Pi writes to the local (X11/xclip) clipboard when it can, which a container has no use for. OSC 52 is
