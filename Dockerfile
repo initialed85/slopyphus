@@ -104,5 +104,5 @@ WORKDIR /workspace
 
 RUN pi update && pi update --extensions
 
-ENTRYPOINT [ "/docker-entrypoint.sh" ]
+ENTRYPOINT [ "exec", "/docker-entrypoint.sh" ]
 CMD []

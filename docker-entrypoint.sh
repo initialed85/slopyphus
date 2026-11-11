@@ -20,7 +20,7 @@ touch /docker-entrypoint-hook.sh >/dev/null 2>&1 || true
 
 bash -lic 'pi update'
 
-if ! bash /docker-entrypoint-hook.sh; then
+if ! bash -lic "/docker-entrypoint-hook.sh"; then
 	echo "error: failed to run /docker-entrypoint-hook.sh"
 	exit 1
 fi
