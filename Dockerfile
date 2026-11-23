@@ -100,6 +100,33 @@ COPY tools/tmux-osc-wrap.py /usr/local/share/slopyphus/tmux-osc-wrap.py
 COPY tools/pi-images.sh /usr/local/bin/pi-images
 RUN chmod 0755 /usr/local/share/slopyphus/tmux-osc-wrap.py /usr/local/bin/pi-images
 
+# git, and the ssh client it drives, are hard runtime requirements of a pod, not build-time niceties:
+# docker-entrypoint-hook.sh does `git clone ssh://git@github.com/...` and `git pull` on the agent's own repo,
+# and `pi install git:github.com/...` shells out to git ("Error: spawn git ENOENT"). Without them every agent
+# pod fails the hook, and docker-entrypoint.sh exits 1 on a failed hook, so the whole namespace crash-loops
+# and the only symptom in the log is line 12: git: command not found.
+#
+# They used to be here by accident rather than by request: `apt install -y docker-ce ...` pulled a Recommends
+# closure (git, git-man, liberror-perl, perl, openssh-client, less, patch, xauth and the X11 libs ssh drags
+# in), and Docker 29.10.0 dropped that closure -- compare /var/log/apt/history.log in the two images built
+# from the same Dockerfile: 29.9.3 installed 290 packages with git marked `automatic`, 29.10.0 installed 269
+# and git is simply absent. Nothing in this Dockerfile mentioned git either time. That is the whole reason
+# this is stated explicitly and asserted below: a dependency that arrives through a third party's Recommends
+# can vanish in a mirror refresh, and it fails at boot in every pod rather than at build.
+#
+# A separate layer, deliberately placed after the download layers rather than as one more word in the apt
+# line above: editing that line invalidates everything below it (uv, go, nvm, the pi installer, kubectl),
+# which turns a two-minute rebuild into a ten-minute one for a package that nothing else depends on.
+# --no-install-recommends so this layer is exactly these three and the closure is ours to change.
+RUN apt update && \
+    apt install -y --no-install-recommends git openssh-client less && \
+    rm -rf /var/lib/apt/lists/*
+
+# The assertion is the point of the layer, not decoration: if the package ever stops installing, the image
+# build fails and Argo keeps the last good tag, instead of fourteen agents crash-looping on a :latest nobody
+# read.
+RUN git --version && ssh -V
+
 WORKDIR /workspace
 
 RUN pi update && pi update --extensions
