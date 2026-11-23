@@ -323,6 +323,48 @@ if (measureFile) {
     : result.result?.value ?? null;
 }
 
+// --resize-seq is the browser-drag case from the page's side: a list of viewport sizes ("1200x700,1180x690,...")
+// applied --resize-gap-ms apart, each one a real Emulation.setDeviceMetricsOverride. That is what a user dragging
+// a window edge produces: xterm's fit addon resizes, ttyd sends the size over the websocket, tmux reflows the
+// window, the relay forwards it to the child, and every client-side addon re-runs on the render that follows.
+//
+// --perf-metrics brackets the sequence with Performance.getMetrics, which is Chrome's own cumulative main-thread
+// accounting (TaskDuration, ScriptDuration, LayoutDuration, RecalcStyleDuration). It is the number that says
+// where a slow reflow lives: a relay in a pane costs nothing in these four, a client-side redraw of pictures
+// costs ScriptDuration.
+const resizeSeq = arg("resize-seq", "");
+const resizeGapMs = Number(arg("resize-gap-ms", 250));
+const perfMetrics = has("perf-metrics");
+if (resizeSeq || perfMetrics) await send("Performance.enable", {}, sessionId);
+
+const metrics = async () => {
+  const m = await send("Performance.getMetrics", {}, sessionId);
+  const out = {};
+  for (const e of m.metrics ?? []) if (/(Duration|Tasks|Nodes|Frames)$/.test(e.name)) out[e.name] = e.value;
+  return out;
+};
+
+if (resizeSeq) {
+  let before = perfMetrics ? await metrics() : null;
+  outcome.resizes = [];
+  for (const spec of resizeSeq.split(",").map((s) => s.trim()).filter(Boolean)) {
+    const [w, h] = spec.split("x").map(Number);
+    if (!(w > 0 && h > 0)) throw new Error(`--resize-seq: bad size '${spec}'`);
+    const t0 = Date.now();
+    await send("Emulation.setDeviceMetricsOverride", { width: w, height: h, deviceScaleFactor: 1, mobile: has("mobile") }, sessionId);
+    const step = { spec, cdp_ms: Date.now() - t0 };
+    await new Promise((r) => setTimeout(r, resizeGapMs));
+    if (perfMetrics) {
+      const now = await metrics();
+      step.script_ms = +(((now.ScriptDuration ?? 0) - (before.ScriptDuration ?? 0)) * 1000).toFixed(1);
+      step.task_ms = +(((now.TaskDuration ?? 0) - (before.TaskDuration ?? 0)) * 1000).toFixed(1);
+      step.layout_ms = +(((now.LayoutDuration ?? 0) - (before.LayoutDuration ?? 0)) * 1000).toFixed(1);
+      before = now;
+    }
+    outcome.resizes.push(step);
+  }
+}
+
 // Keys go through Chrome's input pipeline, so a press produces keydown, keypress (when the key carries
 // text) and keyup the way a physical keyboard does. Focus first: Chrome delivers key events to the focused
 // element, and a headless page has nothing focused.

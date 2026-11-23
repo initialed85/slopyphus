@@ -28,6 +28,15 @@ import zlib
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 spec = importlib.util.spec_from_file_location("osc_wrap", os.path.join(REPO, "tools", "tmux-osc-wrap.py"))
 osc_wrap = importlib.util.module_from_spec(spec)
+
+# The three defaults are cleared rather than inherited, and this has to happen before the module is executed: the
+# module reads OSC_WRAP_* into constants at import and binds them as the defaults of Rewriter.__init__, so setting
+# osc_wrap.ANCHOR afterwards changes nothing that a constructor call sees. The pods these tests run in set
+# OSC_WRAP_ANCHOR=1 for the deployed panes, which would otherwise make a check worded as "the shipped default" mean
+# one thing in a pod and another in CI. A relay started as a subprocess sees the same cleared environment, and any
+# check that cares about a flag passes the flag.
+for _var in ("OSC_WRAP_ANCHOR", "OSC_WRAP_RESERVE", "OSC_WRAP_INLINE"):
+    os.environ.pop(_var, None)
 spec.loader.exec_module(osc_wrap)
 
 fails = 0

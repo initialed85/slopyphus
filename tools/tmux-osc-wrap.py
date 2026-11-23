@@ -141,19 +141,22 @@ def wrap(payload: bytes) -> bytes:
 
 
 def terminator(buf: bytearray, start: int) -> int:
-    """Index just past the OSC terminator (BEL or ST), or -1 when it has not arrived yet."""
-    i = start
-    n = len(buf)
-    while i < n:
-        c = buf[i]
-        if c == 0x07:
-            return i + 1
-        if c == 0x1B:
-            if i + 1 < n and buf[i + 1] == 0x5C:
-                return i + 2
-            # A lone ESC at the very end may be the first half of an ST that has not been read yet.
-        i += 1
-    return -1
+    """Index just past the OSC terminator (BEL or ST), or -1 when it has not arrived yet.
+
+    Found with the interpreter's own byte scan instead of a Python loop over every byte, because of how often this
+    runs: a picture is tens of kilobytes of base64 arriving in 64 KiB reads, and `feed` calls this again for every
+    read while the payload is still being held. A per-byte scan of the whole held buffer on every read is O(n^2) in
+    the size of one repaint, and a transcript full of pictures is a long repaint. The two scans below look for the
+    same two terminators and take whichever comes first, which is what the loop decided, just at C speed.
+    """
+    bel = buf.find(b"\x07", start)
+    st = buf.find(b"\x1b\\", start)
+    if bel == -1 and st == -1:
+        # A lone ESC at the very end may be the first half of an ST that has not been read yet: keep holding.
+        return -1
+    if bel != -1 and (st == -1 or bel < st):
+        return bel + 1
+    return st + 2
 
 
 class Rewriter:
@@ -209,29 +212,29 @@ class Rewriter:
             del b[:end]
             wrapped = wrap(payload) if self.enable else payload
             cols, rows = self.term_size
-            n = reserve_rows(payload, cols, rows) if self.reserve else 0
+            # Asked once, in one shape: the row count and the saved name are the two things derived from a picture,
+            # and only the anchor needs the name, so the byte path never decodes a picture it is only forwarding.
+            n, name = layout_of(payload, cols, rows, self.anchor) if self.reserve else (0, "")
             anchored = False
-            if self.anchor and n:
+            if self.anchor and n and name:
                 # An anchor is only worth printing when the room the picture needs is also known. An anchor the
-                # browser cannot size is a picture drawn over somebody's text.
-                raw, kind = decode_image(payload)
-                name = save_image(raw, kind) if raw else ""
-                if name:
-                    # The anchor first, then the picture it names, then the rows underneath the picture, because
-                    # that order *is* the geometry: the anchor line takes a row of its own and returns the cursor to
-                    # column 0 of it (see anchor_line), and an inline image renders downward from the cursor cell
-                    # without moving it, so the token's cell is the picture's top-left cell.
-                    out += anchor_line(name, n)
-                    if self.inline:
-                        out += wrapped
-                    # Deliberately outside the wrapper. A newline tmux parses is a newline the pane's own grid
-                    # keeps, which is what keeps the rows under a picture consistent when the pane redraws;
-                    # inside the wrapper they would reach only whoever is looking.
-                    out += reserve_newlines(n)
-                    self.stats["images"] += 1
-                    self.stats["rows"] += n
-                    self.stats["anchors"] += 1
-                    anchored = True
+                # browser cannot size is a picture drawn over somebody's text, and an anchor naming a file the
+                # relay failed to write is a broken image tag.
+                # The anchor first, then the picture it names, then the rows underneath the picture, because
+                # that order *is* the geometry: the anchor line takes a row of its own and returns the cursor to
+                # column 0 of it (see anchor_line), and an inline image renders downward from the cursor cell
+                # without moving it, so the token's cell is the picture's top-left cell.
+                out += anchor_line(name, n)
+                if self.inline:
+                    out += wrapped
+                # Deliberately outside the wrapper. A newline tmux parses is a newline the pane's own grid
+                # keeps, which is what keeps the rows under a picture consistent when the pane redraws;
+                # inside the wrapper they would reach only whoever is looking.
+                out += reserve_newlines(n)
+                self.stats["images"] += 1
+                self.stats["rows"] += n
+                self.stats["anchors"] += 1
+                anchored = True
             if not anchored:
                 # Nothing on the far side has been told a picture belongs here, so the bytes are the picture and
                 # passing them is the only way anybody sees it. This is also where an image whose size could not be
@@ -321,9 +324,12 @@ def image_dimensions(payload: bytes):
     if at == -1:
         return None
     blob = body[at + 1:]
-    end = 0
-    while end < len(blob) and blob[end] not in (0x07, 0x1B):
-        end += 1
+    # The base64 ends at the first terminator, and finding that end is what this function was actually slow at: it
+    # walked byte by byte to the end of the whole blob - tens of kilobytes per picture, once per picture per repaint
+    # - when all it needs is the first 2 KB of it. Scanning for both terminators keeps the same rule (stop at a BEL
+    # or an ESC) at C speed.
+    ends = [x for x in (blob.find(b"\x07"), blob.find(b"\x1b")) if x != -1]
+    end = min(ends) if ends else len(blob)
     head = blob[: min(end, 2048)]
     trimmed = len(head) - (len(head) % 4)
     if trimmed < 8:
@@ -496,6 +502,49 @@ def prune_images():
             os.remove(os.path.join(IMAGES_DIR, name))
         except OSError:
             pass
+
+
+LAYOUT_CACHE = {}  # sha256(payload) -> {"size": (cols, rows), "rows": int, "name": str}
+LAYOUT_CACHE_MAX = 1024
+
+
+def layout_of(payload: bytes, cols: int, rows: int, want_name: bool) -> tuple:
+    """(pane rows this picture covers, name of the file its anchor points at), remembering repeated pictures.
+
+    A TUI that repaints on resize re-emits the identical bytes each time, and re-decoding a picture and rewriting
+    its file is work nobody asked for: measured at about 17 ms of CPU per anchored picture, which is what a
+    twelve-picture transcript costs per repaint when the picture is already on disk. The key is the content, so a
+    re-emit hits.
+
+    The two halves are keyed apart on purpose. The row count is a fact about the pane's current size, so a resize
+    recomputes it - that is arithmetic, and cheap. The saved name is a fact about the picture, so it survives a
+    resize and is only written once. A request that does not want a name never decodes the picture: the byte path
+    forwards what it is given and must not pay for a file nobody will fetch.
+
+    A cached name is still checked against the filesystem when an anchor is about to use it. The anchor is a promise
+    about a URL somebody's browser will fetch, and a name whose file has been pruned out from under us would be a
+    404 on the far side, so a stale hit falls back to the full path and writes it again.
+    """
+    key = hashlib.sha256(payload).digest()
+    ent = LAYOUT_CACHE.get(key) or {}
+    name = ent.get("name", "")
+    if name and want_name and not os.path.exists(os.path.join(IMAGES_DIR, name)):
+        name = ""
+    if ent.get("size") == (cols, rows):
+        rows_covered = ent["rows"]
+    else:
+        rows_covered = reserve_rows(payload, cols, rows)
+        name = "" if want_name else name  # a new size proves nothing about whether the file is still there
+    if want_name and not name and rows_covered:
+        raw, kind = decode_image(payload)
+        name = save_image(raw, kind) if raw else ""
+    # Re-inserting rather than assigning, so a picture that is still being drawn stays in the retained set while
+    # the pictures that have scrolled away age out - the same rule prune_images applies to the files.
+    LAYOUT_CACHE.pop(key, None)
+    LAYOUT_CACHE[key] = {"size": (cols, rows), "rows": rows_covered, "name": name}
+    while len(LAYOUT_CACHE) > LAYOUT_CACHE_MAX:
+        del LAYOUT_CACHE[next(iter(LAYOUT_CACHE))]
+    return rows_covered, name
 
 
 def anchor_line(name: str, rows: int) -> bytes:
