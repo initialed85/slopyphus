@@ -88,8 +88,18 @@ COPY docker-entrypoint.sh /docker-entrypoint.sh
 COPY --from=ttyd-builder /usr/local/bin/ttyd /usr/bin/ttyd
 RUN ttyd --version && ttyd --version | grep -q slopyphus
 
-RUN mkdir -p /root/.pi/agent/extensions
-COPY compaction-summary-guard.ts loop-guard.ts queue-reload.ts session-commands.ts /root/.pi/agent/extensions/
+# No Pi extensions are baked into this image. They come from the pi-ed package, installed per pod by the
+# entrypoint hook (`pi install git:github.com/initialed85/pi-ed`, see home-ops
+# clusters/dev/applications/slopyphus/configmap-credentials.yaml), which writes /root/.pi/agent/settings.json
+# and whose package.json declares `extensions: ["./extensions"]`. Four copies used to be COPYed here as
+# .ts files, and that was a second source rather than a safety net: Pi loaded both and disambiguated the
+# duplicates in /v1/commands (`queue-reload:1`), and the copies here were frozen at 2026-10-29 while the
+# package had moved on (compaction-summary-guard 2026-11-03, queue-reload 2026-11-20), so the stale one
+# loaded alongside the current one.
+#
+# The trade being signed: if a pod's hook fails, that pod now has no extensions at all rather than four
+# leftovers. That fails loudly, not silently - docker-entrypoint.sh exits 1 on a failed hook (see its
+# line 23), so the pod crash-loops and Argo keeps the last healthy revision.
 
 # Inline images for a pane. tmux discards a bare OSC 1337 and Pi's fullscreen TUI switches its own image output
 # off before it starts, so neither half of the problem is fixed by the other: tools/pi-images.sh runs Pi in the
