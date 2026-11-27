@@ -97,6 +97,11 @@ RUN ttyd --version && ttyd --version | grep -q slopyphus
 # package had moved on (compaction-summary-guard 2026-11-03, queue-reload 2026-11-20), so the stale one
 # loaded alongside the current one.
 #
+# That hook declares an unpinned git source, which resolves to the repo's default branch, so the tag that is
+# supposed to be a roll boundary constrained nothing. The pin is applied in docker-entrypoint.sh (see the
+# PI_ED_REF block there) after the hook runs, because re-installing the same source unpinned replaces a
+# pinned declaration. This Dockerfile pins nothing: there is no package source in it to pin.
+#
 # The trade being signed: if a pod's hook fails, that pod now has no extensions at all rather than four
 # leftovers. That fails loudly, not silently - docker-entrypoint.sh exits 1 on a failed hook (see its
 # line 23), so the pod crash-loops and Argo keeps the last healthy revision.
@@ -139,6 +144,9 @@ RUN git --version && ssh -V
 
 WORKDIR /workspace
 
+# Deliberately not the place where the package ref is pinned: at this point in the build no package is
+# configured yet (the per-pod hook is what writes settings.json), so this reconciles nothing and there is no
+# source string here to pin. The pin lives in docker-entrypoint.sh, where the declaration actually exists.
 RUN pi update && pi update --extensions
 
 ENTRYPOINT [ "/docker-entrypoint.sh" ]

@@ -25,6 +25,32 @@ if ! bash -lic "bash /docker-entrypoint-hook.sh"; then
 	exit 1
 fi
 
+# The pi-ed package has to land on the roll tag, not on whatever master was when this pod happened to start.
+# The hook above installs it from home-ops clusters/dev/applications/slopyphus/configmap-credentials.yaml with
+# an *unpinned* git source, and pi resolves an unpinned git source to the default branch. Measured on
+# 2026-11-27 in a throwaway PI_CODING_AGENT_DIR (so no running pod was touched):
+#
+#   pi install git:github.com/initialed85/pi-ed   -> settings.json: "git:github.com/initialed85/pi-ed"
+#   pi update --extensions                         -> clone HEAD 6dd831a (master), while roll-2026-11-27 was f3df978
+#   pi install git:github.com/initialed85/pi-ed@roll-2026-11-27
+#   pi update --extensions                         -> clone HEAD f3df978, and it stays there on every later update
+#
+# That is pi's documented behaviour (docs/packages.md: "Git tags and commits are also pinned; package updates
+# reconcile the checkout but do not move a configured ref"), and it is the difference between a fleet that is
+# one build and a fleet that is sixteen pods each frozen at the moment it last rebooted - which is what the
+# idle-compaction gate was measured on: pods running a fail-open gate beside pods running a deferred one.
+#
+# Order matters and is the non-obvious half: re-installing the same source unpinned *replaces* the pinned
+# declaration (measured: settings.json went from `...@roll-2026-11-27` back to the unpinned string), so this
+# must run after the hook, and the fleet-wide fix is still to pin the hook's own string in home-ops.
+#
+# A roll is then one act, not a race: move the tag (or set PI_ED_REF in the pod spec) and restart.
+PI_ED_REF=${PI_ED_REF:-roll-2026-11-27}
+if ! bash -lic "pi install git:github.com/initialed85/pi-ed@${PI_ED_REF}"; then
+	echo "error: could not pin the pi-ed package to ${PI_ED_REF}; refusing to start on an unpinned source"
+	exit 1
+fi
+
 bash -lic 'pi update --extensions'
 
 # Pi writes to the local (X11/xclip) clipboard when it can, which a container has no use for. OSC 52 is
